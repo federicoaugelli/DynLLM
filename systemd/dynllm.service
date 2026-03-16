@@ -1,0 +1,36 @@
+[Unit]
+Description=DynLLM – dynamic OpenAI-compatible model proxy
+After=network.target
+
+[Service]
+Type=simple
+# Change to the user/group that owns the DynLLM installation
+User=dynllm
+Group=dynllm
+
+# Working directory – config.yaml and the state DB will live here
+WorkingDirectory=/opt/dynllm
+
+# Adjust the path to your uv-managed venv / installation
+ExecStart=/usr/local/bin/uv run --project /opt/dynllm dynllm --config /opt/dynllm/config.yaml
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dynllm
+
+# Security hardening (optional but recommended)
+NoNewPrivileges=yes
+ProtectSystem=full
+PrivateTmp=yes
+
+# Allow GPU access (needed for llama-server / OVMS)
+# DeviceAllow=/dev/nvidia* rw
+DeviceAllow=/dev/dri rw
+
+[Install]
+WantedBy=multi-user.target

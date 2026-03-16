@@ -1,0 +1,98 @@
+# ============================================================
+# DynLLM configuration example
+# Copy to config.yaml and edit to match your setup.
+# ============================================================
+
+# ------------------------------------
+# HTTP server settings
+# ------------------------------------
+server:
+  host: "0.0.0.0"   # bind address
+  port: 8000         # listen port
+
+# ------------------------------------
+# GPU VRAM budget (megabytes)
+# ------------------------------------
+# The proxy will not exceed this when deciding what to load.
+# Set this to your GPU's usable VRAM (e.g. leave ~500 MB headroom
+# for the driver and other processes).
+total_vram_mb: 7500
+
+# ------------------------------------
+# Idle auto-unload timeout (seconds)
+# ------------------------------------
+# A loaded model that receives no requests for this duration is
+# automatically unloaded to free VRAM.
+idle_timeout_seconds: 300
+
+# ------------------------------------
+# Backends
+# ------------------------------------
+# Uncomment only the backends you have installed.
+enabled_backends:
+  - llamacpp    # serves GGUF models via llama-server
+  - openvino    # serves OpenVINO IR models via OVMS
+
+# Backend binary configuration
+backend:
+  llamacpp_binary: "llama-server"   # or /full/path/to/llama-server
+  ovms_binary: "ovms"               # or /full/path/to/ovms
+  # Port range allocated to backend subprocesses (one port per loaded model)
+  port_range_start: 9100
+  port_range_end: 9200
+
+# ------------------------------------
+# Optional: base directory for models
+# ------------------------------------
+# If set, relative 'path' values in the models list are resolved
+# relative to this directory.
+# models_dir: /mnt/models
+
+# ------------------------------------
+# State database
+# ------------------------------------
+db_path: dynllm_state.db
+
+# ------------------------------------
+# Logging
+# ------------------------------------
+log_level: "info"   # debug | info | warning | error
+
+# ------------------------------------
+# Model declarations
+# ------------------------------------
+# Each model has:
+#   name        – unique ID used in API requests (model field)
+#   path        – file (.gguf) or directory (OpenVINO IR) on disk
+#   backend     – "llamacpp" or "openvino"
+#   vram_mb     – estimated VRAM when loaded (used for eviction decisions)
+#
+# llama.cpp extra fields:
+#   n_gpu_layers  – layers to offload to GPU (-1 = all)
+#   context_size  – context window size
+#
+# OpenVINO extra fields:
+#   ovms_shape    – optional shape hint (e.g. "auto")
+
+models:
+  # --- llama.cpp (GGUF) example ---
+  - name: "llama3-8b-q4"
+    path: "/mnt/models/gguf/Meta-Llama-3-8B-Instruct.Q4_K_M.gguf"
+    backend: llamacpp
+    vram_mb: 5500
+    n_gpu_layers: -1       # all layers on GPU
+    context_size: 4096
+
+  - name: "mistral-7b-q5"
+    path: "/mnt/models/gguf/Mistral-7B-Instruct-v0.3.Q5_K_M.gguf"
+    backend: llamacpp
+    vram_mb: 6000
+    n_gpu_layers: -1
+    context_size: 8192
+
+  # --- OpenVINO (IR) example ---
+  - name: "phi3-mini-ov"
+    path: "/mnt/models/openvino/phi-3-mini-4k-instruct-ov"
+    backend: openvino
+    vram_mb: 4096
+    ovms_shape: "auto"
