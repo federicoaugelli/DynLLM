@@ -30,7 +30,7 @@ from dynllm.api.schemas import (
     ModelsResponse,
     UnloadRequest,
 )
-from dynllm.core.config import Settings, get_settings
+from dynllm.core.config import BackendType, Settings, get_settings
 from dynllm.core.vram_manager import VRAMManager
 from dynllm.db.manager import StateManager
 
@@ -122,7 +122,9 @@ async def chat_completions(
     await state.touch(body.model)
 
     raw_body = await request.body()
-    path = "v1/chat/completions"
+    # OVMS uses /v3/ for its OpenAI-compatible endpoints; llama-server uses /v1/
+    api_version = "v3" if model_cfg.backend == BackendType.openvino else "v1"
+    path = f"{api_version}/chat/completions"
 
     if body.stream:
         return await forward_streaming_request(request, port, path, raw_body)
@@ -161,7 +163,9 @@ async def completions(
     await state.touch(body.model)
 
     raw_body = await request.body()
-    path = "v1/completions"
+    # OVMS uses /v3/ for its OpenAI-compatible endpoints; llama-server uses /v1/
+    api_version = "v3" if model_cfg.backend == BackendType.openvino else "v1"
+    path = f"{api_version}/completions"
 
     if body.stream:
         return await forward_streaming_request(request, port, path, raw_body)

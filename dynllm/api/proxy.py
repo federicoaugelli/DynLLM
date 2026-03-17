@@ -68,7 +68,7 @@ async def forward_request(
     # re-parsing – the caller already knows.
     # Use a short initial probe to get response headers.
     async with httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=_CONNECT_TIMEOUT, read=_READ_TIMEOUT)
+        timeout=httpx.Timeout(connect=_CONNECT_TIMEOUT, read=_READ_TIMEOUT, write=30.0, pool=5.0)
     ) as client:
         resp = await client.request(
             method,
