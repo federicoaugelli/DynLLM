@@ -54,9 +54,14 @@ class Backend(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def is_ready(self, port: int, timeout: float = 60.0) -> bool:
+    async def is_ready(
+        self, port: int, model_name: str = "", timeout: float = 60.0
+    ) -> bool:
         """
         Poll the backend until it is accepting requests or *timeout* expires.
+
+        ``model_name`` is the logical name of the model being served (used by
+        backends that require it for their readiness endpoint, e.g. OVMS).
 
         Returns True if ready, False otherwise.
         """

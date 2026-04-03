@@ -2,8 +2,11 @@
 OpenVINO Model Server (OVMS) backend.
 
 Spawns one ``ovms`` subprocess per loaded OpenVINO model directory.
-OVMS exposes a REST API; we use its OpenAI-compatible endpoint under
-``/v3/`` (introduced in OVMS 2023+) or the mediapipe-based ``/v1/`` path.
+OVMS exposes a REST API; inference is proxied via its OpenAI-compatible
+``/v3/`` endpoints (introduced in OVMS 2023+).
+
+Readiness is detected via the KServe Model Readiness endpoint:
+  GET /v2/models/<model_name>/ready  →  200 when the model is loaded
 
 OVMS is started with a single-model config generated on the fly so each
 subprocess serves exactly one model, mirroring the llama-server approach.
@@ -129,79 +132,48 @@ class OpenVINOBackend(Backend):
             except Exception as exc:
                 logger.warning("Failed to clean up temp dir for PID %d: %s", pid, exc)
 
-    async def is_ready(self, port: int, timeout: float = 120.0) -> bool:
+    async def is_ready(
+        self, port: int, model_name: str = "", timeout: float = 120.0
+    ) -> bool:
         """
-        Wait until OVMS is fully ready to serve inference requests.
+        Poll ``GET /v2/models/<model_name>/ready`` until OVMS confirms the
+        model is ready to serve requests, or the timeout expires.
 
-        Two-phase check:
-        1. Poll ``GET /v1/config`` until all model versions report
-           ``"state": "AVAILABLE"`` – this confirms the model IR is loaded.
-        2. Issue a minimal dummy ``POST /v3/chat/completions`` request to
-           warm up the inference path.  OVMS can return 404 or 503 on the
-           very first inference call even after ``/v1/config`` says AVAILABLE,
-           so we retry until we get any response that is *not* 404/503 (an
-           expected 400 "bad request" means the endpoint is live).
+        This is the KServe Model Readiness endpoint that OVMS exposes:
+          - 200  → model is loaded and ready
+          - 503  → model is still loading
+          - 404  → model unknown (should not happen with a correctly configured name)
+
+        Using this endpoint avoids any inference probe entirely, which
+        previously caused false 404 responses due to a wrong model name in
+        the probe body.
 
         OVMS can take a while to load large IR models so we use a generous
         default timeout of 120 s.
         """
-        config_url = f"http://127.0.0.1:{port}/v1/config"
-        infer_url = f"http://127.0.0.1:{port}/v3/chat/completions"
+        if not model_name:
+            logger.warning(
+                "OVMS is_ready() called without model_name; falling back to /v1/config"
+            )
+            ready_url = f"http://127.0.0.1:{port}/v1/config"
+        else:
+            ready_url = f"http://127.0.0.1:{port}/v2/models/{model_name}/ready"
+
         deadline = asyncio.get_event_loop().time() + timeout
 
-        # ------------------------------------------------------------------
-        # Phase 1 – wait for /v1/config to report all models AVAILABLE
-        # ------------------------------------------------------------------
         async with httpx.AsyncClient(timeout=3.0) as client:
             while asyncio.get_event_loop().time() < deadline:
                 try:
-                    resp = await client.get(config_url)
+                    resp = await client.get(ready_url)
                     if resp.status_code == 200:
-                        data = resp.json()
-                        all_ready = all(
-                            any(
-                                v.get("state") == "AVAILABLE" for v in versions.values()
-                            )
-                            for versions in data.values()
-                        )
-                        if all_ready:
-                            logger.debug(
-                                "OVMS port %d: /v1/config reports all models AVAILABLE",
-                                port,
-                            )
-                            break
-                except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
-                    pass
-
-                await asyncio.sleep(_POLL_INTERVAL)
-            else:
-                logger.warning("OVMS on port %d did not become ready in time", port)
-                return False
-
-        # ------------------------------------------------------------------
-        # Phase 2 – probe the actual inference endpoint to ensure it is live.
-        # Send a minimal (invalid) payload; any response other than 404/503
-        # means the endpoint is accepting requests.
-        # ------------------------------------------------------------------
-        _PROBE_BODY = b'{"model":"probe","messages":[]}'
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            while asyncio.get_event_loop().time() < deadline:
-                try:
-                    resp = await client.post(
-                        infer_url,
-                        content=_PROBE_BODY,
-                        headers={"Content-Type": "application/json"},
-                    )
-                    if resp.status_code not in (404, 503, 502):
                         logger.info(
-                            "OVMS on port %d is ready (inference endpoint alive, "
-                            "probe status %d)",
+                            "OVMS on port %d: model '%s' is ready",
                             port,
-                            resp.status_code,
+                            model_name,
                         )
                         return True
                     logger.debug(
-                        "OVMS port %d: inference probe returned %d, retrying…",
+                        "OVMS port %d: readiness probe returned %d, retrying…",
                         port,
                         resp.status_code,
                     )
@@ -211,6 +183,9 @@ class OpenVINOBackend(Backend):
                 await asyncio.sleep(_POLL_INTERVAL)
 
         logger.warning(
-            "OVMS on port %d: inference endpoint did not become ready in time", port
+            "OVMS on port %d: model '%s' did not become ready within %.0fs",
+            port,
+            model_name,
+            timeout,
         )
         return False
