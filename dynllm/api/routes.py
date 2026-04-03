@@ -31,7 +31,7 @@ from dynllm.api.schemas import (
     UnloadRequest,
 )
 from dynllm.core.config import BackendType, Settings, get_settings
-from dynllm.core.vram_manager import VRAMManager
+from dynllm.core.vram_manager import VRAMManager, decrement_active, increment_active
 from dynllm.db.manager import StateManager
 
 logger = logging.getLogger(__name__)
@@ -126,10 +126,14 @@ async def chat_completions(
     api_version = "v3" if model_cfg.backend == BackendType.openvino else "v1"
     path = f"{api_version}/chat/completions"
 
-    if body.stream:
-        return await forward_streaming_request(request, port, path, raw_body)
-    else:
-        return await forward_request(request, port, path, raw_body)
+    await increment_active(body.model)
+    try:
+        if body.stream:
+            return await forward_streaming_request(request, port, path, raw_body)
+        else:
+            return await forward_request(request, port, path, raw_body)
+    finally:
+        await decrement_active(body.model)
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +171,14 @@ async def completions(
     api_version = "v3" if model_cfg.backend == BackendType.openvino else "v1"
     path = f"{api_version}/completions"
 
-    if body.stream:
-        return await forward_streaming_request(request, port, path, raw_body)
-    else:
-        return await forward_request(request, port, path, raw_body)
+    await increment_active(body.model)
+    try:
+        if body.stream:
+            return await forward_streaming_request(request, port, path, raw_body)
+        else:
+            return await forward_request(request, port, path, raw_body)
+    finally:
+        await decrement_active(body.model)
 
 
 # ---------------------------------------------------------------------------

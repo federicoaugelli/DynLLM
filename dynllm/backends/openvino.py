@@ -131,23 +131,33 @@ class OpenVINOBackend(Backend):
 
     async def is_ready(self, port: int, timeout: float = 120.0) -> bool:
         """
-        Poll ``GET http://127.0.0.1:<port>/v1/config`` until OVMS reports
-        all models are AVAILABLE, or the timeout expires.
+        Wait until OVMS is fully ready to serve inference requests.
+
+        Two-phase check:
+        1. Poll ``GET /v1/config`` until all model versions report
+           ``"state": "AVAILABLE"`` – this confirms the model IR is loaded.
+        2. Issue a minimal dummy ``POST /v3/chat/completions`` request to
+           warm up the inference path.  OVMS can return 404 or 503 on the
+           very first inference call even after ``/v1/config`` says AVAILABLE,
+           so we retry until we get any response that is *not* 404/503 (an
+           expected 400 "bad request" means the endpoint is live).
 
         OVMS can take a while to load large IR models so we use a generous
         default timeout of 120 s.
         """
-        # OVMS readiness endpoint
-        ready_url = f"http://127.0.0.1:{port}/v1/config"
+        config_url = f"http://127.0.0.1:{port}/v1/config"
+        infer_url = f"http://127.0.0.1:{port}/v3/chat/completions"
         deadline = asyncio.get_event_loop().time() + timeout
 
+        # ------------------------------------------------------------------
+        # Phase 1 – wait for /v1/config to report all models AVAILABLE
+        # ------------------------------------------------------------------
         async with httpx.AsyncClient(timeout=3.0) as client:
             while asyncio.get_event_loop().time() < deadline:
                 try:
-                    resp = await client.get(ready_url)
+                    resp = await client.get(config_url)
                     if resp.status_code == 200:
                         data = resp.json()
-                        # All model versions should be in AVAILABLE state
                         all_ready = all(
                             any(
                                 v.get("state") == "AVAILABLE" for v in versions.values()
@@ -155,12 +165,52 @@ class OpenVINOBackend(Backend):
                             for versions in data.values()
                         )
                         if all_ready:
-                            logger.info("OVMS on port %d is ready", port)
-                            return True
+                            logger.debug(
+                                "OVMS port %d: /v1/config reports all models AVAILABLE",
+                                port,
+                            )
+                            break
+                except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
+                    pass
+
+                await asyncio.sleep(_POLL_INTERVAL)
+            else:
+                logger.warning("OVMS on port %d did not become ready in time", port)
+                return False
+
+        # ------------------------------------------------------------------
+        # Phase 2 – probe the actual inference endpoint to ensure it is live.
+        # Send a minimal (invalid) payload; any response other than 404/503
+        # means the endpoint is accepting requests.
+        # ------------------------------------------------------------------
+        _PROBE_BODY = b'{"model":"probe","messages":[]}'
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    resp = await client.post(
+                        infer_url,
+                        content=_PROBE_BODY,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    if resp.status_code not in (404, 503, 502):
+                        logger.info(
+                            "OVMS on port %d is ready (inference endpoint alive, "
+                            "probe status %d)",
+                            port,
+                            resp.status_code,
+                        )
+                        return True
+                    logger.debug(
+                        "OVMS port %d: inference probe returned %d, retrying…",
+                        port,
+                        resp.status_code,
+                    )
                 except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
                     pass
 
                 await asyncio.sleep(_POLL_INTERVAL)
 
-        logger.warning("OVMS on port %d did not become ready in time", port)
+        logger.warning(
+            "OVMS on port %d: inference endpoint did not become ready in time", port
+        )
         return False

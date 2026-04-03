@@ -29,6 +29,36 @@ from dynllm.db.models import ModelStatus
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Active-request tracking
+# ---------------------------------------------------------------------------
+# Maps model_name -> number of in-flight inference requests.
+# Maintained outside the VRAMManager lock so route handlers can update it
+# without acquiring the heavy orchestration lock.
+_active_requests: dict[str, int] = {}
+_active_lock = asyncio.Lock()
+
+
+async def increment_active(model_name: str) -> None:
+    """Signal that a new inference request for *model_name* has started."""
+    async with _active_lock:
+        _active_requests[model_name] = _active_requests.get(model_name, 0) + 1
+
+
+async def decrement_active(model_name: str) -> None:
+    """Signal that an inference request for *model_name* has finished."""
+    async with _active_lock:
+        count = _active_requests.get(model_name, 0)
+        if count > 1:
+            _active_requests[model_name] = count - 1
+        else:
+            _active_requests.pop(model_name, None)
+
+
+def get_active_count(model_name: str) -> int:
+    """Return the number of in-flight requests for *model_name* (non-blocking)."""
+    return _active_requests.get(model_name, 0)
+
 
 class PortAllocator:
     """Simple sequential port allocator within a configured range."""
@@ -145,22 +175,32 @@ class VRAMManager:
     async def _evict_for(self, required_mb: int) -> None:
         """
         Evict loaded models in LIFO order until *required_mb* VRAM is free.
+
+        Models with active in-flight inference requests are never evicted to
+        avoid interrupting an ongoing generation.
         """
         while True:
             free = await self._free_vram()
             if free >= required_mb:
                 return
 
-            # Find the most-recently loaded model (highest load_order) to evict
+            # Find the most-recently loaded model (highest load_order) to evict,
+            # but skip any model that currently has active inference requests.
             loaded_models = await self._state.get_loaded()
-            if not loaded_models:
+            evictable = [m for m in loaded_models if get_active_count(m.name) == 0]
+
+            if not evictable:
+                active_names = [
+                    m.name for m in loaded_models if get_active_count(m.name) > 0
+                ]
                 raise RuntimeError(
                     f"Not enough VRAM: need {required_mb} MB but only "
-                    f"{free} MB free with no models to evict."
+                    f"{free} MB free. All loaded models have active requests "
+                    f"and cannot be evicted: {active_names}"
                 )
 
-            # LIFO: evict the model with the highest load_order
-            victim = max(loaded_models, key=lambda m: m.load_order)
+            # LIFO: evict the most recently loaded evictable model
+            victim = max(evictable, key=lambda m: m.load_order)
             logger.info(
                 "VRAM pressure: evicting model '%s' (%d MB) to free space for "
                 "incoming request (need %d MB, have %d MB free)",

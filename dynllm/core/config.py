@@ -7,10 +7,11 @@ overridable via the DYNLLM_CONFIG env var).
 
 from __future__ import annotations
 
+import math
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -46,6 +47,33 @@ class ModelConfig(BaseModel):
     # --- OVMS specific ---
     ovms_shape: Optional[str] = None
     """Optional shape hint for OVMS (e.g. 'auto'). Only used by openvino backend."""
+
+    # --- Idle unload ---
+    unload_time: Optional[float] = None
+    """
+    Per-model idle timeout in seconds before the model is automatically unloaded.
+
+    * ``null`` / omitted – inherit the global ``idle_timeout_seconds`` setting.
+    * positive number    – unload after this many idle seconds.
+    * ``-1`` or ``inf``  – never auto-unload this model (it stays loaded until
+                           VRAM pressure forces eviction or a manual unload).
+    """
+
+    @field_validator("unload_time", mode="before")
+    @classmethod
+    def parse_unload_time(cls, v: object) -> Optional[float]:
+        if v is None:
+            return None
+        if isinstance(v, str) and v.lower() in ("inf", "infinity", "never"):
+            return math.inf
+        val = float(v)  # type: ignore[arg-type]
+        if val == -1:
+            return math.inf
+        if val <= 0:
+            raise ValueError(
+                "unload_time must be a positive number, -1 (never), or inf"
+            )
+        return val
 
     @field_validator("path", mode="before")
     @classmethod
@@ -95,6 +123,14 @@ class Settings(BaseModel):
     """Which backends are active. Models whose backend is not listed will be rejected."""
 
     models: list[ModelConfig] = Field(default_factory=list)
+
+    preload_models: list[str] = Field(default_factory=list)
+    """
+    Names of models to load automatically on startup.
+
+    Each entry must match a ``name`` field in the ``models`` list.
+    Models are loaded in the order listed; VRAM eviction rules apply normally.
+    """
 
     db_path: Path = Field(default=Path("dynllm_state.db"))
     """Path to the SQLite state database."""

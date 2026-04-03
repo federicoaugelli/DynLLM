@@ -63,6 +63,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
         vram_manager,
         state_manager,
         idle_timeout=settings.idle_timeout_seconds,
+        settings=settings,
     )
 
     @asynccontextmanager
@@ -70,6 +71,24 @@ def create_app(config_path: str | None = None) -> FastAPI:
         # Startup
         await state_manager.heal_stale_states()
         set_managers(vram_manager, state_manager)
+
+        # Preload models listed in config
+        for model_name in settings.preload_models:
+            model_cfg = settings.model_by_name(model_name)
+            if model_cfg is None:
+                logger.warning(
+                    "preload_models: model '%s' not found in config, skipping",
+                    model_name,
+                )
+                continue
+            logger.info("Preloading model '%s' as requested by config …", model_name)
+            try:
+                await vram_manager.ensure_loaded(model_cfg)
+                await state_manager.touch(model_name)
+                logger.info("Preloaded model '%s' successfully", model_name)
+            except Exception as exc:
+                logger.error("Failed to preload model '%s': %s", model_name, exc)
+
         scheduler_task = asyncio.create_task(scheduler.run())
         logger.info(
             "DynLLM proxy listening on %s:%d",

@@ -59,13 +59,22 @@ db_path: dynllm_state.db
 log_level: "info"   # debug | info | warning | error
 
 # ------------------------------------
+# Startup preload
+# ------------------------------------
+# Models listed here are loaded automatically when DynLLM starts.
+# Each entry must match a 'name' in the models list below.
+# Normal VRAM eviction rules apply.
+# preload_models:
+#   - "llama3-8b-q4"
+
+# ------------------------------------
 # Model declarations
 # ------------------------------------
 # Each model has:
-#   name        – unique ID used in API requests (model field)
-#   path        – file (.gguf) or directory (OpenVINO IR) on disk
-#   backend     – "llamacpp" or "openvino"
-#   vram_mb     – estimated VRAM when loaded (used for eviction decisions)
+#   name         – unique ID used in API requests (model field)
+#   path         – file (.gguf) or directory (OpenVINO IR) on disk
+#   backend      – "llamacpp" or "openvino"
+#   vram_mb      – estimated VRAM when loaded (used for eviction decisions)
 #
 # llama.cpp extra fields:
 #   n_gpu_layers  – layers to offload to GPU (-1 = all)
@@ -73,6 +82,12 @@ log_level: "info"   # debug | info | warning | error
 #
 # OpenVINO extra fields:
 #   ovms_shape    – optional shape hint (e.g. "auto")
+#
+# Per-model idle timeout (optional):
+#   unload_time   – seconds of inactivity before auto-unload.
+#                   Overrides the global idle_timeout_seconds for this model.
+#                   Use -1 or "inf" to never auto-unload (model stays until
+#                   VRAM pressure or manual unload).
 
 models:
   # --- llama.cpp (GGUF) example ---
@@ -82,6 +97,7 @@ models:
     vram_mb: 5500
     n_gpu_layers: -1       # all layers on GPU
     context_size: 4096
+    # unload_time: 600     # unload after 10 min idle (overrides global)
 
   - name: "mistral-7b-q5"
     path: "/mnt/models/gguf/Mistral-7B-Instruct-v0.3.Q5_K_M.gguf"
@@ -89,6 +105,7 @@ models:
     vram_mb: 6000
     n_gpu_layers: -1
     context_size: 8192
+    # unload_time: -1      # never auto-unload
 
   # --- OpenVINO (IR) example ---
   - name: "phi3-mini-ov"
@@ -96,3 +113,4 @@ models:
     backend: openvino
     vram_mb: 4096
     ovms_shape: "auto"
+    # unload_time: inf     # never auto-unload
