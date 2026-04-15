@@ -87,6 +87,22 @@ class CompletionRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Audio endpoints
+# ---------------------------------------------------------------------------
+
+
+class SpeechRequest(BaseModel):
+    model: str
+    input: str
+    voice: Optional[str] = None
+    instructions: Optional[str] = None
+    response_format: Optional[str] = None
+    speed: Optional[float] = None
+
+    model_config = {"extra": "allow"}
+
+
+# ---------------------------------------------------------------------------
 # Admin / management (non-OpenAI endpoints)
 # ---------------------------------------------------------------------------
 

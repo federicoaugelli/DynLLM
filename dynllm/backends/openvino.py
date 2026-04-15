@@ -19,15 +19,20 @@ import json
 import logging
 import tempfile
 from pathlib import Path
+from typing import Final
 
 import httpx
 
 from dynllm.backends.base import Backend
-from dynllm.core.config import BackendType, ModelConfig
+from dynllm.core.config import BackendType, ModelConfig, ModelType
 
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 0.5
+_AUDIO_READINESS_PATHS: Final[tuple[str, ...]] = (
+    "v3/audio/speech",
+    "v3/audio/transcriptions",
+)
 
 
 class OpenVINOBackend(Backend):
@@ -48,45 +53,22 @@ class OpenVINOBackend(Backend):
 
     async def start(self, model: ModelConfig, port: int) -> int:
         """
-        Write an OVMS model config JSON to a temp directory and launch ovms.
+        Launch OVMS for a single model.
 
-        OVMS expects:
-          --model_path   <directory containing the IR files>
-          --model_name   <alias>
-          --port         <gRPC port>   (we disable gRPC)
-          --rest_port    <REST port>
+        LLM models use the config-file flow already used by DynLLM. Audio
+        models use OVMS task mode with a model repository path pointing at the
+        parent directory and the configured model name mapped to the directory.
         """
         model_path = Path(model.path)
         if not model_path.exists():
-            raise RuntimeError(f"Model directory not found: {model_path}")
-
-        # Build per-model config JSON
-        config = {
-            "model_config_list": [
-                {
-                    "config": {
-                        "name": model.name,
-                        "base_path": str(model_path),
-                        **({"shape": model.ovms_shape} if model.ovms_shape else {}),
-                    }
-                }
-            ]
-        }
+            raise RuntimeError(f"Model path not found: {model_path}")
 
         tmpdir = tempfile.TemporaryDirectory(prefix=f"dynllm_ovms_{model.name}_")
-        config_file = Path(tmpdir.name) / "config.json"
-        config_file.write_text(json.dumps(config, indent=2))
-
-        cmd = [
-            self._binary,
-            "--config_path",
-            str(config_file),
-            "--rest_port",
-            str(port),
-            # Disable gRPC to avoid port conflicts
-            "--port",
-            "0",
-        ]
+        try:
+            cmd = self._build_command(model, port, model_path, Path(tmpdir.name))
+        except Exception:
+            tmpdir.cleanup()
+            raise
 
         logger.info(
             "Starting OVMS for model '%s' on REST port %d: %s",
@@ -118,6 +100,75 @@ class OpenVINOBackend(Backend):
 
         logger.debug("OVMS for '%s' started with PID %d", model.name, proc.pid)
         return proc.pid
+
+    def _build_command(
+        self, model: ModelConfig, port: int, model_path: Path, temp_dir: Path
+    ) -> list[str]:
+        if model.model_type == ModelType.llm:
+            return self._build_llm_command(model, port, model_path, temp_dir)
+        if model.model_type == ModelType.transcription:
+            return self._build_audio_command(model, port, model_path, "speech2text")
+        if model.model_type == ModelType.speech:
+            return self._build_audio_command(model, port, model_path, "text2speech")
+        raise RuntimeError(
+            f"Unsupported OpenVINO model_type '{model.model_type.value}' for '{model.name}'"
+        )
+
+    def _build_llm_command(
+        self, model: ModelConfig, port: int, model_path: Path, temp_dir: Path
+    ) -> list[str]:
+        config = {
+            "model_config_list": [
+                {
+                    "config": {
+                        "name": model.name,
+                        "base_path": str(model_path),
+                        **({"shape": model.ovms_shape} if model.ovms_shape else {}),
+                    }
+                }
+            ]
+        }
+
+        config_file = temp_dir / "config.json"
+        config_file.write_text(json.dumps(config, indent=2))
+        return [
+            self._binary,
+            "--config_path",
+            str(config_file),
+            "--rest_port",
+            str(port),
+            "--target_device",
+            model.target_device,
+            "--port",
+            "0",
+        ]
+
+    def _build_audio_command(
+        self, model: ModelConfig, port: int, model_path: Path, task: str
+    ) -> list[str]:
+        if not model_path.is_dir():
+            raise RuntimeError(
+                f"OpenVINO audio model '{model.name}' must point to a directory: {model_path}"
+            )
+        repository_path = model_path.parent
+        source_model = model_path.name
+        return [
+            self._binary,
+            "--rest_port",
+            str(port),
+            "--port",
+            "0",
+            "--model_repository_path",
+            str(repository_path),
+            "--source_model",
+            source_model,
+            "--model_name",
+            model.name,
+            "--task",
+            task,
+            "--target_device",
+            model.target_device,
+        ]
 
     async def stop(self, pid: int) -> None:
         """Terminate the OVMS process with *pid* and clean up its temp config."""
@@ -172,6 +223,14 @@ class OpenVINOBackend(Backend):
                             model_name,
                         )
                         return True
+                    if resp.status_code == 404 and model_name:
+                        if await self._audio_endpoints_present(client, port):
+                            logger.info(
+                                "OVMS on port %d: audio model '%s' is ready",
+                                port,
+                                model_name,
+                            )
+                            return True
                     logger.debug(
                         "OVMS port %d: readiness probe returned %d, retrying…",
                         port,
@@ -189,3 +248,15 @@ class OpenVINOBackend(Backend):
             timeout,
         )
         return False
+
+    async def _audio_endpoints_present(
+        self, client: httpx.AsyncClient, port: int
+    ) -> bool:
+        for path in _AUDIO_READINESS_PATHS:
+            try:
+                resp = await client.options(f"http://127.0.0.1:{port}/{path}")
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
+                return False
+            if resp.status_code not in (200, 204, 405):
+                return False
+        return True

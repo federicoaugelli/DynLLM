@@ -22,6 +22,12 @@ class BackendType(str, Enum):
     openvino = "openvino"
 
 
+class ModelType(str, Enum):
+    llm = "llm"
+    transcription = "transcription"
+    speech = "speech"
+
+
 class ModelConfig(BaseModel):
     """Declaration of a single model available to the proxy."""
 
@@ -34,8 +40,14 @@ class ModelConfig(BaseModel):
     backend: BackendType
     """Which backend should serve this model."""
 
-    vram_mb: int = Field(gt=0)
+    model_type: ModelType = ModelType.llm
+    """What kind of workload this model serves."""
+
+    vram_mb: int = Field(ge=0)
     """Estimated VRAM this model consumes when loaded, in megabytes."""
+
+    target_device: str = "CPU"
+    """OpenVINO target device (e.g. CPU, GPU, NPU)."""
 
     # --- llama.cpp specific ---
     n_gpu_layers: int = Field(default=-1)
@@ -79,6 +91,20 @@ class ModelConfig(BaseModel):
     @classmethod
     def expand_path(cls, v: object) -> Path:
         return Path(str(v)).expanduser()
+
+    @field_validator("target_device")
+    @classmethod
+    def normalize_target_device(cls, v: str) -> str:
+        value = v.strip().upper()
+        if not value:
+            raise ValueError("target_device cannot be empty")
+        return value
+
+    @model_validator(mode="after")
+    def validate_backend_model_type(self) -> "ModelConfig":
+        if self.backend == BackendType.llamacpp and self.model_type != ModelType.llm:
+            raise ValueError("llamacpp only supports model_type=llm")
+        return self
 
 
 class ServerConfig(BaseModel):

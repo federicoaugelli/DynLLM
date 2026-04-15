@@ -11,7 +11,7 @@ unloads idle models after a configurable timeout.
 
 ## Features
 
-- **OpenAI-compatible API** – `/v1/chat/completions`, `/v1/completions`, `/v1/models`
+- **OpenAI-compatible API** – `/v1/chat/completions`, `/v1/completions`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/speech`, `/v1/models`
 - **Dynamic loading** – models are started on first request and stopped when idle
 - **VRAM budgeting** – LIFO eviction keeps total GPU memory within a configured limit
 - **Multi-backend** – supports llama.cpp (GGUF) and OpenVINO Model Server (IR) simultaneously
@@ -88,7 +88,9 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `name` | yes | Unique model ID; used as the `model` field in API requests |
 | `path` | yes | Path to the `.gguf` file (llama.cpp) or OpenVINO IR directory |
 | `backend` | yes | `llamacpp` or `openvino` |
+| `model_type` | no | `llm`, `transcription`, or `speech`. Default: `llm` |
 | `vram_mb` | yes | Estimated VRAM in MB when loaded (used for eviction math) |
+| `target_device` | no | OpenVINO target device (`CPU`, `GPU`, `NPU`). Default: `CPU` |
 | `n_gpu_layers` | no | llama.cpp only – GPU layers (`-1` = all). Default: `-1` |
 | `context_size` | no | llama.cpp only – context window size. Default: `4096` |
 | `ovms_shape` | no | OpenVINO only – shape hint (e.g. `"auto"`) |
@@ -122,6 +124,7 @@ models:
   - name: "llama3-8b-q4"
     path: "/mnt/models/gguf/Meta-Llama-3-8B-Instruct.Q4_K_M.gguf"
     backend: llamacpp
+    model_type: llm
     vram_mb: 5500
     n_gpu_layers: -1
     context_size: 4096
@@ -129,9 +132,25 @@ models:
   - name: "phi3-mini-ov"
     path: "/mnt/models/openvino/phi-3-mini-4k-instruct-ov"
     backend: openvino
+    model_type: llm
+    target_device: GPU
     vram_mb: 4096
     ovms_shape: "auto"
     unload_time: -1   # keep this model loaded permanently
+
+  - name: "whisper-large-v3-ov"
+    path: "/mnt/models/openvino/whisper-large-v3-ov"
+    backend: openvino
+    model_type: transcription
+    target_device: CPU
+    vram_mb: 0
+
+  - name: "speecht5-ov"
+    path: "/mnt/models/openvino/speecht5-ov"
+    backend: openvino
+    model_type: speech
+    target_device: CPU
+    vram_mb: 0
 ```
 
 ---
@@ -171,6 +190,37 @@ curl http://localhost:8000/v1/chat/completions \
 
 OpenAI-compatible text completions. Supports streaming.
 
+### `POST /v1/audio/transcriptions`
+
+OpenAI-compatible speech-to-text endpoint. DynLLM accepts the standard multipart request and proxies it to OVMS.
+
+```bash
+curl http://localhost:8000/v1/audio/transcriptions \
+  -F "model=whisper-large-v3-ov" \
+  -F "file=@speech.wav"
+```
+
+### `POST /v1/audio/translations`
+
+OpenAI-compatible speech translation endpoint. This uses the same OpenVINO transcription models and maps to OVMS `/v3/audio/translations`.
+
+```bash
+curl http://localhost:8000/v1/audio/translations \
+  -F "model=whisper-large-v3-ov" \
+  -F "file=@speech-es.wav"
+```
+
+### `POST /v1/audio/speech`
+
+OpenAI-compatible text-to-speech endpoint. OVMS currently returns WAV audio.
+
+```bash
+curl http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"model":"speecht5-ov","input":"Hello from DynLLM"}' \
+  -o speech.wav
+```
+
 ### `GET /admin/models`
 
 Returns detailed internal state for every known model (status, port, PID, VRAM, timestamps).
@@ -191,7 +241,7 @@ curl -X POST http://localhost:8000/admin/models/unload \
 
 ### Load on demand
 
-When a `/v1/chat/completions` or `/v1/completions` request arrives:
+When a `/v1/chat/completions`, `/v1/completions`, or `/v1/audio/*` request arrives:
 1. DynLLM looks up the model in the config by name.
 2. If not loaded: checks whether enough VRAM is free.
 3. If not enough VRAM: evicts models in **LIFO order** (most recently loaded first),
@@ -268,7 +318,11 @@ lines in `systemd/dynllm.service`.
 ### OpenVINO Model Server (OVMS)
 
 - Serves **OpenVINO IR** model directories only (not GGUF).
-- One `ovms` process per loaded model, launched with a generated single-model config.
+- One `ovms` process per loaded model.
+- `model_type: llm` uses the standard single-model OVMS config flow.
+- `model_type: transcription` and `model_type: speech` use OVMS audio task mode.
+- Audio endpoints require an OVMS release with OpenAI audio support, such as `2025.4+`.
+- Current OVMS speech-to-text support is limited to `wav` and `mp3` uploads.
 - gRPC is disabled (`--port 0`); only the REST API is used.
 - Uses OVMS's OpenAI-compatible `/v3/` endpoints.
 - Readiness is detected in two phases:

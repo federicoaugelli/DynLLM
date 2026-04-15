@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -28,13 +29,24 @@ from dynllm.api.schemas import (
     ModelObject,
     ModelStateResponse,
     ModelsResponse,
+    SpeechRequest,
     UnloadRequest,
 )
-from dynllm.core.config import BackendType, Settings, get_settings
+from dynllm.core.config import (
+    BackendType,
+    ModelConfig,
+    ModelType,
+    Settings,
+    get_settings,
+)
 from dynllm.core.vram_manager import VRAMManager, decrement_active, increment_active
 from dynllm.db.manager import StateManager
 
 logger = logging.getLogger(__name__)
+_MULTIPART_MODEL_RE = re.compile(
+    rb'name="model"\r\n\r\n(?P<model>[^\r\n]+)',
+    re.IGNORECASE,
+)
 
 router = APIRouter()
 
@@ -64,6 +76,59 @@ def _get_state() -> StateManager:
     if _state_manager is None:
         raise RuntimeError("StateManager not initialised")
     return _state_manager
+
+
+def _require_model(
+    settings: Settings,
+    model_name: str,
+    *,
+    expected_types: set[ModelType],
+) -> ModelConfig:
+    model_cfg = settings.model_by_name(model_name)
+    if model_cfg is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{model_name}' is not configured in DynLLM.",
+        )
+    if model_cfg.model_type not in expected_types:
+        allowed = ", ".join(sorted(model_type.value for model_type in expected_types))
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model_name}' is configured as '{model_cfg.model_type.value}' "
+                f"and cannot serve this endpoint. Expected: {allowed}."
+            ),
+        )
+    return model_cfg
+
+
+async def _ensure_loaded(model_cfg: ModelConfig, vram: VRAMManager) -> int:
+    try:
+        return await vram.ensure_loaded(model_cfg)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+async def _proxy_model_request(
+    request: Request,
+    *,
+    model_cfg: ModelConfig,
+    state: StateManager,
+    vram: VRAMManager,
+    path: str,
+    stream: bool = False,
+) -> Response:
+    port = await _ensure_loaded(model_cfg, vram)
+    await state.touch(model_cfg.name)
+    raw_body = await request.body()
+
+    await increment_active(model_cfg.name)
+    try:
+        if stream:
+            return await forward_streaming_request(request, port, path, raw_body)
+        return await forward_request(request, port, path, raw_body)
+    finally:
+        await decrement_active(model_cfg.name)
 
 
 # ---------------------------------------------------------------------------
@@ -106,34 +171,18 @@ async def chat_completions(
     Loads the model on-demand if it is not already in VRAM.
     Supports both streaming (SSE) and non-streaming responses.
     """
-    model_cfg = settings.model_by_name(body.model)
-    if model_cfg is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Model '{body.model}' is not configured in DynLLM.",
-        )
-
-    try:
-        port = await vram.ensure_loaded(model_cfg)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-
-    # Update last_used_at
-    await state.touch(body.model)
-
-    raw_body = await request.body()
+    model_cfg = _require_model(settings, body.model, expected_types={ModelType.llm})
     # OVMS uses /v3/ for its OpenAI-compatible endpoints; llama-server uses /v1/
     api_version = "v3" if model_cfg.backend == BackendType.openvino else "v1"
     path = f"{api_version}/chat/completions"
-
-    await increment_active(body.model)
-    try:
-        if body.stream:
-            return await forward_streaming_request(request, port, path, raw_body)
-        else:
-            return await forward_request(request, port, path, raw_body)
-    finally:
-        await decrement_active(body.model)
+    return await _proxy_model_request(
+        request,
+        model_cfg=model_cfg,
+        state=state,
+        vram=vram,
+        path=path,
+        stream=body.stream,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -152,33 +201,133 @@ async def completions(
     """
     Proxy a text completion request to the appropriate backend.
     """
-    model_cfg = settings.model_by_name(body.model)
-    if model_cfg is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Model '{body.model}' is not configured in DynLLM.",
-        )
-
-    try:
-        port = await vram.ensure_loaded(model_cfg)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-
-    await state.touch(body.model)
-
-    raw_body = await request.body()
+    model_cfg = _require_model(settings, body.model, expected_types={ModelType.llm})
     # OVMS uses /v3/ for its OpenAI-compatible endpoints; llama-server uses /v1/
     api_version = "v3" if model_cfg.backend == BackendType.openvino else "v1"
     path = f"{api_version}/completions"
+    return await _proxy_model_request(
+        request,
+        model_cfg=model_cfg,
+        state=state,
+        vram=vram,
+        path=path,
+        stream=body.stream,
+    )
 
-    await increment_active(body.model)
+
+# ---------------------------------------------------------------------------
+# /v1/audio/transcriptions and translations
+# ---------------------------------------------------------------------------
+
+
+async def _audio_form_model_name(request: Request) -> str:
+    raw_body = await request.body()
+    match = _MULTIPART_MODEL_RE.search(raw_body)
+    if match is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required multipart field 'model'.",
+        )
     try:
-        if body.stream:
-            return await forward_streaming_request(request, port, path, raw_body)
-        else:
-            return await forward_request(request, port, path, raw_body)
-    finally:
-        await decrement_active(body.model)
+        model_name = match.group("model").decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise HTTPException(
+            status_code=400, detail="Invalid multipart model field."
+        ) from exc
+    if not model_name:
+        raise HTTPException(
+            status_code=400,
+            detail="Missing required multipart field 'model'.",
+        )
+    return model_name
+
+
+async def _audio_form_request(
+    request: Request,
+    *,
+    settings: Settings,
+    vram: VRAMManager,
+    state: StateManager,
+    path: str,
+) -> Response:
+    model_name = await _audio_form_model_name(request)
+    model_cfg = _require_model(
+        settings,
+        model_name,
+        expected_types={ModelType.transcription},
+    )
+    if model_cfg.backend != BackendType.openvino:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{model_name}' does not use the OpenVINO backend.",
+        )
+    return await _proxy_model_request(
+        request,
+        model_cfg=model_cfg,
+        state=state,
+        vram=vram,
+        path=path,
+    )
+
+
+@router.post("/v1/audio/transcriptions")
+async def audio_transcriptions(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    vram: VRAMManager = Depends(_get_vram),
+    state: StateManager = Depends(_get_state),
+) -> Response:
+    return await _audio_form_request(
+        request,
+        settings=settings,
+        vram=vram,
+        state=state,
+        path="v3/audio/transcriptions",
+    )
+
+
+@router.post("/v1/audio/translations")
+async def audio_translations(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    vram: VRAMManager = Depends(_get_vram),
+    state: StateManager = Depends(_get_state),
+) -> Response:
+    return await _audio_form_request(
+        request,
+        settings=settings,
+        vram=vram,
+        state=state,
+        path="v3/audio/translations",
+    )
+
+
+# ---------------------------------------------------------------------------
+# /v1/audio/speech
+# ---------------------------------------------------------------------------
+
+
+@router.post("/v1/audio/speech")
+async def audio_speech(
+    request: Request,
+    body: SpeechRequest,
+    settings: Settings = Depends(get_settings),
+    vram: VRAMManager = Depends(_get_vram),
+    state: StateManager = Depends(_get_state),
+) -> Response:
+    model_cfg = _require_model(settings, body.model, expected_types={ModelType.speech})
+    if model_cfg.backend != BackendType.openvino:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{body.model}' does not use the OpenVINO backend.",
+        )
+    return await _proxy_model_request(
+        request,
+        model_cfg=model_cfg,
+        state=state,
+        vram=vram,
+        path="v3/audio/speech",
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -74,7 +74,9 @@ log_level: "info"   # debug | info | warning | error
 #   name         – unique ID used in API requests (model field)
 #   path         – file (.gguf) or directory (OpenVINO IR) on disk
 #   backend      – "llamacpp" or "openvino"
+#   model_type   – "llm", "transcription", or "speech"
 #   vram_mb      – estimated VRAM when loaded (used for eviction decisions)
+#   target_device – OpenVINO target device (CPU/GPU/NPU); defaults to CPU
 #
 # llama.cpp extra fields:
 #   n_gpu_layers  – layers to offload to GPU (-1 = all)
@@ -94,6 +96,7 @@ models:
   - name: "llama3-8b-q4"
     path: "/mnt/models/gguf/Meta-Llama-3-8B-Instruct.Q4_K_M.gguf"
     backend: llamacpp
+    model_type: llm
     vram_mb: 5500
     n_gpu_layers: -1       # all layers on GPU
     context_size: 4096
@@ -102,6 +105,7 @@ models:
   - name: "mistral-7b-q5"
     path: "/mnt/models/gguf/Mistral-7B-Instruct-v0.3.Q5_K_M.gguf"
     backend: llamacpp
+    model_type: llm
     vram_mb: 6000
     n_gpu_layers: -1
     context_size: 8192
@@ -111,6 +115,22 @@ models:
   - name: "phi3-mini-ov"
     path: "/mnt/models/openvino/phi-3-mini-4k-instruct-ov"
     backend: openvino
+    model_type: llm
+    target_device: GPU
     vram_mb: 4096
     ovms_shape: "auto"
     # unload_time: inf     # never auto-unload
+
+  - name: "whisper-large-v3-ov"
+    path: "/mnt/models/openvino/whisper-large-v3-ov"
+    backend: openvino
+    model_type: transcription
+    target_device: CPU
+    vram_mb: 0
+
+  - name: "speecht5-ov"
+    path: "/mnt/models/openvino/speecht5-ov"
+    backend: openvino
+    model_type: speech
+    target_device: CPU
+    vram_mb: 0
