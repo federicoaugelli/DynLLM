@@ -123,6 +123,7 @@ class OpenVINOBackend(Backend):
                     "config": {
                         "name": model.name,
                         "base_path": str(model_path),
+                        "target_device": model.target_device,
                         **({"shape": model.ovms_shape} if model.ovms_shape else {}),
                     }
                 }
@@ -137,8 +138,6 @@ class OpenVINOBackend(Backend):
             str(config_file),
             "--rest_port",
             str(port),
-            "--target_device",
-            model.target_device,
             "--port",
             "0",
         ]
