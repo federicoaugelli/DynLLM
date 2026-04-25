@@ -80,7 +80,7 @@ class OpenVINOBackend(Backend):
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
 
         # Brief wait to detect immediate crashes
