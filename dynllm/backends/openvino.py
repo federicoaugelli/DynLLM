@@ -183,7 +183,7 @@ class OpenVINOBackend(Backend):
                 logger.warning("Failed to clean up temp dir for PID %d: %s", pid, exc)
 
     async def is_ready(
-        self, port: int, model_name: str = "", timeout: float = 120.0
+        self, port: int, model_name: str = "", timeout: float = 120.0, model_type: str = "llm"
     ) -> bool:
         """
         Poll ``GET /v2/models/<model_name>/ready`` until OVMS confirms the
@@ -200,6 +200,9 @@ class OpenVINOBackend(Backend):
 
         OVMS can take a while to load large IR models so we use a generous
         default timeout of 120 s.
+
+        Audio models (transcription / speech) do not register a KServe model
+        so their readiness must be detected via the /v3/audio/* endpoints.
         """
         if not model_name:
             logger.warning(
@@ -222,7 +225,7 @@ class OpenVINOBackend(Backend):
                             model_name,
                         )
                         return True
-                    if resp.status_code == 404 and model_name:
+                    if resp.status_code == 404 and model_name and model_type != "llm":
                         if await self._audio_endpoints_present(client, port):
                             logger.info(
                                 "OVMS on port %d: audio model '%s' is ready",

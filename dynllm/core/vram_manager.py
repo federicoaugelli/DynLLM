@@ -227,7 +227,7 @@ class VRAMManager:
                 f"Failed to start backend for '{model.name}': {exc}"
             ) from exc
 
-        ready = await backend.is_ready(port, model.name)
+        ready = await backend.is_ready(port, model.name, model_type=model.model_type.value)
         if not ready:
             # Kill the stalled process
             try:

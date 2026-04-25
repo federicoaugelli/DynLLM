@@ -95,7 +95,7 @@ class LlamaCppBackend(Backend):
         await self._terminate_pid(pid)
 
     async def is_ready(
-        self, port: int, model_name: str = "", timeout: float = 60.0
+        self, port: int, model_name: str = "", timeout: float = 60.0, model_type: str = "llm"
     ) -> bool:
         """
         Poll ``GET http://127.0.0.1:<port>/health`` until llama-server
