@@ -33,10 +33,13 @@ class TransformersBackend(Backend):
         return BackendType.transformers
 
     def _backend_model_name(self, model: ModelConfig) -> str:
-        return str(Path(model.path))
+        model_name = str(Path(model.path))
+        if model.revision is not None:
+            return f"{model_name}@{model.revision}"
+        return model_name
 
     def _build_command(self, model: ModelConfig, port: int) -> list[str]:
-        return [
+        cmd = [
             self._binary,
             "serve",
             self._backend_model_name(model),
@@ -50,6 +53,21 @@ class TransformersBackend(Backend):
             model.dtype,
         ]
 
+        if model.quantization.value != "none":
+            cmd.extend(["--quantization", model.quantization.value])
+        if model.trust_remote_code:
+            cmd.append("--trust-remote-code")
+        if model.compile_model:
+            cmd.append("--compile")
+        if model.continuous_batching:
+            cmd.append("--continuous-batching")
+        if model.attn_implementation.value != "auto":
+            cmd.extend(["--attn-implementation", model.attn_implementation.value])
+        if model.model_timeout is not None:
+            cmd.extend(["--model-timeout", str(model.model_timeout)])
+
+        return cmd
+
     async def start(self, model: ModelConfig, port: int) -> int:
         model_path = Path(model.path)
         if not model_path.exists():
@@ -62,11 +80,12 @@ class TransformersBackend(Backend):
 
         cmd = self._build_command(model, port)
         logger.info(
-            "Starting transformers serve for model '%s' on port %d (device=%s, dtype=%s)",
+            "Starting transformers serve for model '%s' on port %d (device=%s, dtype=%s, quantization=%s)",
             model.name,
             port,
             model.device,
             model.dtype,
+            model.quantization.value,
         )
         logger.debug("transformers serve command: %s", " ".join(cmd))
 

@@ -29,6 +29,21 @@ class ModelType(str, Enum):
     speech = "speech"
 
 
+class TransformersQuantization(str, Enum):
+    none = "none"
+    bnb_4bit = "bnb-4bit"
+    bnb_8bit = "bnb-8bit"
+
+
+class TransformersAttentionImplementation(str, Enum):
+    auto = "auto"
+    eager = "eager"
+    sdpa = "sdpa"
+    flash_attention_2 = "flash_attention_2"
+    flash_attention_3 = "flash_attention_3"
+    flex_attention = "flex_attention"
+
+
 class ModelConfig(BaseModel):
     """Declaration of a single model available to the proxy."""
 
@@ -67,6 +82,29 @@ class ModelConfig(BaseModel):
 
     dtype: str = "auto"
     """Model dtype for transformers backend ('auto', 'float16', 'bfloat16', 'float32')."""
+
+    quantization: TransformersQuantization = TransformersQuantization.none
+    """Optional transformers quantization mode ('none', 'bnb-4bit', 'bnb-8bit')."""
+
+    trust_remote_code: bool = False
+    """Allow custom model code execution in transformers for repos that require it."""
+
+    compile_model: bool = False
+    """Enable torch.compile through transformers serve when supported."""
+
+    continuous_batching: bool = False
+    """Enable transformers continuous batching for supported LLMs."""
+
+    attn_implementation: TransformersAttentionImplementation = (
+        TransformersAttentionImplementation.auto
+    )
+    """Attention backend for transformers serve."""
+
+    model_timeout: Optional[int] = Field(default=None, gt=0)
+    """Idle timeout in seconds for transformers model auto-unload inside the backend."""
+
+    revision: Optional[str] = None
+    """Optional Hugging Face revision appended as model@revision for transformers serve."""
 
     # --- Idle unload ---
     unload_time: Optional[float] = None
@@ -124,6 +162,18 @@ class ModelConfig(BaseModel):
             raise ValueError("dtype cannot be empty")
         return value
 
+    @field_validator("revision")
+    @classmethod
+    def normalize_transformers_revision(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        value = v.strip()
+        if not value:
+            raise ValueError("revision cannot be empty")
+        if "@" in value:
+            raise ValueError("revision must not contain '@'; configure it separately")
+        return value
+
     @model_validator(mode="after")
     def validate_backend_model_type(self) -> "ModelConfig":
         if self.backend == BackendType.llamacpp and self.model_type != ModelType.llm:
@@ -134,6 +184,22 @@ class ModelConfig(BaseModel):
         ):
             raise ValueError(
                 "transformers supports model_type=llm and model_type=transcription"
+            )
+        if (
+            self.backend == BackendType.transformers
+            and self.quantization != TransformersQuantization.none
+            and self.model_type != ModelType.llm
+        ):
+            raise ValueError(
+                "transformers quantization is currently supported only for model_type=llm"
+            )
+        if (
+            self.backend == BackendType.transformers
+            and self.quantization != TransformersQuantization.none
+            and self.dtype not in ("auto", "float16", "bfloat16")
+        ):
+            raise ValueError(
+                "transformers quantization requires dtype to be auto, float16, or bfloat16"
             )
         return self
 

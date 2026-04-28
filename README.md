@@ -98,6 +98,13 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `ovms_shape` | no | OpenVINO only – shape hint (e.g. `"auto"`) |
 | `device` | no | transformers only – execution device (`auto`, `cpu`, `cuda`, `xpu`) |
 | `dtype` | no | transformers only – load dtype (`auto`, `float16`, `bfloat16`, `float32`) |
+| `quantization` | no | transformers only – `none`, `bnb-4bit`, or `bnb-8bit` for bitsandbytes quantization |
+| `trust_remote_code` | no | transformers only – allow custom repo code when required |
+| `compile_model` | no | transformers only – enable `torch.compile` through `transformers serve` |
+| `continuous_batching` | no | transformers only – enable continuous batching for supported LLMs |
+| `attn_implementation` | no | transformers only – `auto`, `eager`, `sdpa`, `flash_attention_2`, `flash_attention_3`, `flex_attention` |
+| `model_timeout` | no | transformers only – backend-side idle timeout in seconds |
+| `revision` | no | transformers only – HF revision rendered as `model@revision` |
 | `unload_time` | no | Per-model idle timeout (seconds). Overrides `idle_timeout_seconds`. Use `-1` or `inf` to never auto-unload |
 
 ### Example config
@@ -164,6 +171,9 @@ models:
     model_type: llm
     device: xpu
     dtype: bfloat16
+    quantization: bnb-4bit
+    attn_implementation: sdpa
+    model_timeout: 300
     vram_mb: 6500
 ```
 
@@ -354,7 +364,7 @@ lines in `systemd/dynllm.service`.
 - One `transformers serve` process per loaded model.
 - DynLLM keeps the public model alias from `config.yaml` and rewrites backend requests to the local model path expected by `transformers serve`.
 - Supports `model_type: llm` and `model_type: transcription`.
-- Relevant config fields: `device`, `dtype`.
+- Relevant config fields: `device`, `dtype`, `quantization`, `trust_remote_code`, `compile_model`, `continuous_batching`, `attn_implementation`, `model_timeout`, `revision`.
 - For Intel GPUs, install torch from the XPU wheel index before installing `transformers[serving]`:
 
 ```bash
@@ -363,6 +373,9 @@ uv pip install "transformers[serving]"
 ```
 
 - For CUDA systems, install the CUDA-specific torch wheels first, then `transformers[serving]`.
+- `quantization: bnb-4bit` and `quantization: bnb-8bit` map to bitsandbytes loading in `transformers serve`.
+- In practice, bitsandbytes is most proven on CUDA. On Intel XPU it may work, but treat it as deployment-specific and validate the exact torch + bitsandbytes stack on your target machine before relying on it in production.
+- Quantization is enabled only for `model_type: llm` in DynLLM.
 - DynLLM still applies the same VRAM accounting, LIFO eviction, and idle unload rules used for llama.cpp and OVMS.
 
 ---

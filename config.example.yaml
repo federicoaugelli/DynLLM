@@ -90,6 +90,14 @@ log_level: "info"   # debug | info | warning | error
 # transformers extra fields:
 #   device        – execution device (`auto`, `cpu`, `cuda`, `xpu`)
 #   dtype         – load dtype (`auto`, `float16`, `bfloat16`, `float32`)
+#   quantization  – `none`, `bnb-4bit`, or `bnb-8bit` (LLM only)
+#   trust_remote_code – allow custom model code when required by the repo
+#   compile_model – enable torch.compile inside `transformers serve`
+#   continuous_batching – enable continuous batching for supported LLMs
+#   attn_implementation – `auto`, `eager`, `sdpa`, `flash_attention_2`,
+#                         `flash_attention_3`, `flex_attention`
+#   model_timeout – idle timeout inside `transformers serve` in seconds
+#   revision      – optional HF revision appended as model@revision
 #
 # Per-model idle timeout (optional):
 #   unload_time   – seconds of inactivity before auto-unload.
@@ -148,6 +156,13 @@ models:
     model_type: llm
     device: xpu
     dtype: bfloat16
+    # quantization: bnb-4bit
+    # trust_remote_code: false
+    # compile_model: false
+    # continuous_batching: false
+    # attn_implementation: sdpa
+    # model_timeout: 300
+    # revision: main
     vram_mb: 6500
 
   - name: "whisper-large-v3-hf"
