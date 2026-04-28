@@ -134,3 +134,45 @@ def test_transcription_rejects_llm_model(client):
 
     assert response.status_code == 400
     assert "configured as 'llm'" in response.json()["detail"]
+
+
+def test_transformers_transcription_rewrites_model_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+enabled_backends:
+  - transformers
+models:
+  - name: whisper-hf
+    path: /tmp/whisper-hf
+    backend: transformers
+    model_type: transcription
+    device: xpu
+    dtype: float16
+    vram_mb: 2048
+""".strip()
+    )
+    app = create_app(str(config_path))
+
+    dummy_vram = DummyVRAM()
+    dummy_state = DummyState()
+    routes.set_managers(dummy_vram, dummy_state)
+
+    forwarded: list[tuple[int, str, bytes]] = []
+
+    async def fake_forward_request(request, port, path, body):  # noqa: ANN001
+        forwarded.append((port, path, body))
+        return routes.Response(content=b"ok", media_type="application/json")
+
+    monkeypatch.setattr(routes, "forward_request", fake_forward_request)
+
+    client = TestClient(app)
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("speech.wav", b"wav-data", "audio/wav")},
+        data={"model": "whisper-hf"},
+    )
+
+    assert response.status_code == 200
+    assert b"/tmp/whisper-hf" in forwarded[0][2]
+    assert b'name="model"\r\n\r\n/tmp/whisper-hf' in forwarded[0][2]

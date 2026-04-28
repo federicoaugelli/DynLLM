@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+from pathlib import Path
 
 from dynllm.core.config import BackendType, Settings
 
@@ -38,7 +39,48 @@ _INSTALL_HINTS: dict[BackendType, str] = {
         "    https://github.com/openvinotoolkit/model_server\n"
         "  Or set 'backend.ovms_binary' in your config to the full path."
     ),
+    BackendType.transformers: (
+        "transformers CLI not found on PATH.\n"
+        "  Install the serving extras into your DynLLM environment:\n"
+        "    uv pip install \"transformers[serving]\"\n"
+        "  For Intel GPUs, install torch with XPU wheels first:\n"
+        "    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu\n"
+        "  Then set 'backend.transformers_binary' if the CLI is outside PATH."
+    ),
 }
+
+
+def detect_execution_backends() -> list[str]:
+    """Return the torch execution backends available in this environment."""
+    backends = ["cpu"]
+    try:
+        import torch
+    except Exception:
+        return backends
+
+    checks = [
+        ("cuda", getattr(torch, "cuda", None)),
+        ("xpu", getattr(torch, "xpu", None)),
+    ]
+    for name, module in checks:
+        is_available = getattr(module, "is_available", None)
+        if callable(is_available):
+            try:
+                if is_available():
+                    backends.append(name)
+            except Exception:
+                continue
+
+    mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+    mps_available = getattr(mps_backend, "is_available", None)
+    if callable(mps_available):
+        try:
+            if mps_available():
+                backends.append("mps")
+        except Exception:
+            pass
+
+    return backends
 
 
 def check_backends(settings: Settings) -> None:
@@ -51,6 +93,7 @@ def check_backends(settings: Settings) -> None:
     binary_map: dict[BackendType, str] = {
         BackendType.llamacpp: settings.backend.llamacpp_binary,
         BackendType.openvino: settings.backend.ovms_binary,
+        BackendType.transformers: settings.backend.transformers_binary,
     }
 
     for backend_type in settings.enabled_backends:
@@ -58,7 +101,17 @@ def check_backends(settings: Settings) -> None:
         if binary is None:
             continue
 
-        if shutil.which(binary) is None:
+        resolved = shutil.which(binary)
+        configured_path = Path(binary).expanduser()
+        if resolved is None and configured_path.is_file():
+            logger.warning(
+                "Backend binary '%s' for '%s' exists but is not executable.",
+                configured_path,
+                backend_type.value,
+            )
+            continue
+
+        if resolved is None:
             hint = _INSTALL_HINTS.get(backend_type, "")
             logger.warning(
                 "Backend binary '%s' for '%s' not found on PATH.\n%s",
@@ -70,5 +123,5 @@ def check_backends(settings: Settings) -> None:
             logger.info(
                 "Backend '%s' binary found: %s",
                 backend_type.value,
-                shutil.which(binary),
+                resolved,
             )

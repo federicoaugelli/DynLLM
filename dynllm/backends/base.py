@@ -13,7 +13,9 @@ from __future__ import annotations
 import abc
 import asyncio
 import logging
+import shutil
 import signal
+from pathlib import Path
 from typing import Optional
 
 from dynllm.core.config import BackendType, ModelConfig
@@ -71,6 +73,41 @@ class Backend(abc.ABC):
     # ------------------------------------------------------------------
     # Shared helpers available to all backends
     # ------------------------------------------------------------------
+
+    def _resolve_binary(self, binary: str, setting_name: str) -> str:
+        """Resolve a configured executable name or path if possible."""
+        resolved = shutil.which(binary)
+        if resolved is None:
+            logger.warning(
+                "Backend binary '%s' not found or not executable. "
+                "Set %s to an absolute executable path if needed.",
+                binary,
+                setting_name,
+            )
+            return binary
+
+        logger.debug("Resolved backend binary '%s' to: %s", binary, resolved)
+        return resolved
+
+    def _require_binary(self, binary: str, install_hint: str) -> str:
+        """Return an executable path or raise a targeted startup error."""
+        resolved = shutil.which(binary)
+        if resolved is not None:
+            return resolved
+
+        path = Path(binary).expanduser()
+        if path.exists() and not path.is_file():
+            raise RuntimeError(
+                f"Backend binary path is not a file: '{path}'. "
+                "Point the config at an executable binary."
+            )
+        if path.is_file():
+            raise RuntimeError(
+                f"Backend binary exists but is not executable: '{path}'. "
+                "Fix permissions or point the config at an executable file."
+            )
+
+        raise RuntimeError(f"{install_hint} Configured binary: '{binary}'.")
 
     async def _wait_for_process(self, pid: int, timeout: float = 10.0) -> None:
         """Wait for a process to exit, killing it forcefully if needed."""

@@ -3,7 +3,7 @@
 Agnostic OpenAI-compatible proxy for dynamic model loading and unloading.
 
 DynLLM sits between your OpenAI-compatible client (OpenWebUI, LangChain, curl, …) and
-your local inference backends (llama.cpp and/or OpenVINO Model Server). It automatically
+your local inference backends (llama.cpp, OpenVINO Model Server, and/or Hugging Face transformers). It automatically
 loads models on demand, tracks VRAM usage, evicts models when memory is tight, and
 unloads idle models after a configurable timeout.
 
@@ -14,7 +14,7 @@ unloads idle models after a configurable timeout.
 - **OpenAI-compatible API** – `/v1/chat/completions`, `/v1/completions`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/speech`, `/v1/models`
 - **Dynamic loading** – models are started on first request and stopped when idle
 - **VRAM budgeting** – LIFO eviction keeps total GPU memory within a configured limit
-- **Multi-backend** – supports llama.cpp (GGUF) and OpenVINO Model Server (IR) simultaneously
+- **Multi-backend** – supports llama.cpp (GGUF), OpenVINO Model Server (IR), and `transformers serve`
 - **Per-model idle timeout** – override the global timeout per model, or set `inf`/`-1` to never auto-unload
 - **Startup preloading** – specify models to load when DynLLM starts
 - **Safe mid-generation** – active inference requests are never interrupted by eviction
@@ -29,6 +29,7 @@ unloads idle models after a configurable timeout.
 - At least one backend installed:
   - **llama.cpp** – build `llama-server` from [ggerganov/llama.cpp](https://github.com/ggerganov/llama.cpp)
   - **OpenVINO Model Server** – see the [OVMS installation guide](https://docs.openvino.ai/2024/ovms_docs_deploying_server.html)
+  - **Hugging Face transformers** – install `transformers[serving]`; for Intel GPUs install torch XPU wheels first
 
 ---
 
@@ -78,6 +79,7 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 |---|---|---|
 | `llamacpp_binary` | `llama-server` | Path or name of the llama-server binary |
 | `ovms_binary` | `ovms` | Path or name of the OVMS binary |
+| `transformers_binary` | `transformers` | Path or name of the Hugging Face transformers CLI |
 | `port_range_start` | `9100` | Start of port range for backend subprocesses |
 | `port_range_end` | `9200` | End of port range for backend subprocesses |
 
@@ -86,14 +88,16 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | Field | Required | Description |
 |---|---|---|
 | `name` | yes | Unique model ID; used as the `model` field in API requests |
-| `path` | yes | Path to the `.gguf` file (llama.cpp) or OpenVINO IR directory |
-| `backend` | yes | `llamacpp` or `openvino` |
+| `path` | yes | Path to the `.gguf` file, OpenVINO IR directory, or local Hugging Face model directory |
+| `backend` | yes | `llamacpp`, `openvino`, or `transformers` |
 | `model_type` | no | `llm`, `transcription`, or `speech`. Default: `llm` |
 | `vram_mb` | yes | Estimated VRAM in MB when loaded (used for eviction math) |
 | `target_device` | no | OpenVINO target device (`CPU`, `GPU`, `NPU`). Default: `CPU` |
 | `n_gpu_layers` | no | llama.cpp only – GPU layers (`-1` = all). Default: `-1` |
 | `context_size` | no | llama.cpp only – context window size. Default: `4096` |
 | `ovms_shape` | no | OpenVINO only – shape hint (e.g. `"auto"`) |
+| `device` | no | transformers only – execution device (`auto`, `cpu`, `cuda`, `xpu`) |
+| `dtype` | no | transformers only – load dtype (`auto`, `float16`, `bfloat16`, `float32`) |
 | `unload_time` | no | Per-model idle timeout (seconds). Overrides `idle_timeout_seconds`. Use `-1` or `inf` to never auto-unload |
 
 ### Example config
@@ -109,10 +113,12 @@ idle_timeout_seconds: 300
 enabled_backends:
   - llamacpp
   - openvino
+  - transformers
 
 backend:
   llamacpp_binary: "llama-server"
   ovms_binary: "ovms"
+  transformers_binary: "transformers"
   port_range_start: 9100
   port_range_end: 9200
 
@@ -151,6 +157,14 @@ models:
     model_type: speech
     target_device: CPU
     vram_mb: 0
+
+  - name: "qwen25-3b-hf"
+    path: "/mnt/models/huggingface/Qwen2.5-3B-Instruct"
+    backend: transformers
+    model_type: llm
+    device: xpu
+    dtype: bfloat16
+    vram_mb: 6500
 ```
 
 ---
@@ -192,7 +206,7 @@ OpenAI-compatible text completions. Supports streaming.
 
 ### `POST /v1/audio/transcriptions`
 
-OpenAI-compatible speech-to-text endpoint. DynLLM accepts the standard multipart request and proxies it to OVMS.
+OpenAI-compatible speech-to-text endpoint. DynLLM accepts the standard multipart request and proxies it to OVMS or `transformers serve`, depending on the configured backend.
 
 ```bash
 curl http://localhost:8000/v1/audio/transcriptions \
@@ -265,6 +279,10 @@ VRAM pressure forces eviction or you manually unload it via `/admin/models/unloa
 List model names under `preload_models:` to have them loaded before the proxy
 starts accepting traffic. This reduces first-request latency.
 
+### Startup backend logging
+
+At startup DynLLM logs the available torch execution backends detected in the runtime, for example `['cpu', 'xpu']` or `['cpu', 'cuda']`. This helps verify that the installed torch build matches the hardware backend you expect to use.
+
 ### VRAM eviction (LIFO)
 
 When a new model needs to be loaded and there is insufficient free VRAM, DynLLM
@@ -328,7 +346,24 @@ lines in `systemd/dynllm.service`.
 - Readiness is detected in two phases:
   1. `/v1/config` reports all model versions as `AVAILABLE`.
   2. A probe request to `/v3/chat/completions` confirms the inference path is live
-     (prevents the 404 that OVMS can return immediately after reporting AVAILABLE).
+      (prevents the 404 that OVMS can return immediately after reporting AVAILABLE).
+
+### Hugging Face transformers
+
+- Serves local Hugging Face model directories through `transformers serve`.
+- One `transformers serve` process per loaded model.
+- DynLLM keeps the public model alias from `config.yaml` and rewrites backend requests to the local model path expected by `transformers serve`.
+- Supports `model_type: llm` and `model_type: transcription`.
+- Relevant config fields: `device`, `dtype`.
+- For Intel GPUs, install torch from the XPU wheel index before installing `transformers[serving]`:
+
+```bash
+uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu
+uv pip install "transformers[serving]"
+```
+
+- For CUDA systems, install the CUDA-specific torch wheels first, then `transformers[serving]`.
+- DynLLM still applies the same VRAM accounting, LIFO eviction, and idle unload rules used for llama.cpp and OVMS.
 
 ---
 

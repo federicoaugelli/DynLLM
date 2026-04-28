@@ -32,11 +32,13 @@ idle_timeout_seconds: 300
 enabled_backends:
   - llamacpp    # serves GGUF models via llama-server
   - openvino    # serves OpenVINO IR models via OVMS
+  # - transformers  # serves local Hugging Face models via `transformers serve`
 
 # Backend binary configuration
 backend:
   llamacpp_binary: "llama-server"   # or /full/path/to/llama-server
   ovms_binary: "ovms"               # or /full/path/to/ovms
+  transformers_binary: "transformers"  # or /full/path/to/transformers
   # Port range allocated to backend subprocesses (one port per loaded model)
   port_range_start: 9100
   port_range_end: 9200
@@ -73,7 +75,7 @@ log_level: "info"   # debug | info | warning | error
 # Each model has:
 #   name         – unique ID used in API requests (model field)
 #   path         – file (.gguf) or directory (OpenVINO IR) on disk
-#   backend      – "llamacpp" or "openvino"
+#   backend      – "llamacpp", "openvino", or "transformers"
 #   model_type   – "llm", "transcription", or "speech"
 #   vram_mb      – estimated VRAM when loaded (used for eviction decisions)
 #   target_device – OpenVINO target device (CPU/GPU/NPU); defaults to CPU
@@ -84,6 +86,10 @@ log_level: "info"   # debug | info | warning | error
 #
 # OpenVINO extra fields:
 #   ovms_shape    – optional shape hint (e.g. "auto")
+#
+# transformers extra fields:
+#   device        – execution device (`auto`, `cpu`, `cuda`, `xpu`)
+#   dtype         – load dtype (`auto`, `float16`, `bfloat16`, `float32`)
 #
 # Per-model idle timeout (optional):
 #   unload_time   – seconds of inactivity before auto-unload.
@@ -134,3 +140,20 @@ models:
     model_type: speech
     target_device: CPU
     vram_mb: 0
+
+  # --- transformers serve example ---
+  - name: "qwen25-3b-hf"
+    path: "/mnt/models/huggingface/Qwen2.5-3B-Instruct"
+    backend: transformers
+    model_type: llm
+    device: xpu
+    dtype: bfloat16
+    vram_mb: 6500
+
+  - name: "whisper-large-v3-hf"
+    path: "/mnt/models/huggingface/whisper-large-v3"
+    backend: transformers
+    model_type: transcription
+    device: xpu
+    dtype: float16
+    vram_mb: 3200

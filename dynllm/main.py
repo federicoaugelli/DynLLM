@@ -25,7 +25,7 @@ from dynllm.core.config import load_config
 from dynllm.core.scheduler import IdleScheduler
 from dynllm.core.vram_manager import VRAMManager
 from dynllm.db.manager import StateManager
-from dynllm.installer import check_backends
+from dynllm.installer import check_backends, detect_execution_backends
 
 
 def _configure_logging(level: str) -> None:
@@ -52,6 +52,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
         "Enabled backends: %s",
         [b.value for b in settings.enabled_backends],
     )
+    logger.info("Execution backends available: %s", detect_execution_backends())
     logger.info("Configured models: %s", [m.name for m in settings.models])
 
     # Check that requested binaries are available (skippable)

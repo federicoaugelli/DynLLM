@@ -39,7 +39,7 @@ class OpenVINOBackend(Backend):
     """Backend that manages OVMS subprocesses for OpenVINO IR model directories."""
 
     def __init__(self, binary: str = "ovms") -> None:
-        self._binary = binary
+        self._binary = self._resolve_binary(binary, "backend.ovms_binary")
         # Keep a reference to temp dirs so they are not GC'd while the server runs
         self._temp_dirs: dict[int, tempfile.TemporaryDirectory] = {}  # pid -> tmpdir
 
@@ -62,6 +62,11 @@ class OpenVINOBackend(Backend):
         model_path = Path(model.path)
         if not model_path.exists():
             raise RuntimeError(f"Model path not found: {model_path}")
+
+        self._binary = self._require_binary(
+            self._binary,
+            "OVMS binary not found. Install OpenVINO Model Server or set backend.ovms_binary to an absolute executable path.",
+        )
 
         tmpdir = tempfile.TemporaryDirectory(prefix=f"dynllm_ovms_{model.name}_")
         try:

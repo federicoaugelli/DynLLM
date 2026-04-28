@@ -109,6 +109,34 @@ async def _ensure_loaded(model_cfg: ModelConfig, vram: VRAMManager) -> int:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+def _backend_request_model(model_cfg: ModelConfig) -> str:
+    if model_cfg.backend == BackendType.transformers:
+        return str(model_cfg.path)
+    return model_cfg.name
+
+
+def _rewrite_backend_model(raw_body: bytes, model_cfg: ModelConfig, content_type: str) -> bytes:
+    backend_model = _backend_request_model(model_cfg)
+    if backend_model == model_cfg.name:
+        return raw_body
+
+    if "application/json" in content_type:
+        payload = json.loads(raw_body.decode("utf-8"))
+        payload["model"] = backend_model
+        return json.dumps(payload).encode("utf-8")
+
+    if "multipart/form-data" in content_type:
+        return _MULTIPART_MODEL_RE.sub(
+            lambda match: match.group(0).replace(
+                match.group("model"), backend_model.encode("utf-8")
+            ),
+            raw_body,
+            count=1,
+        )
+
+    return raw_body
+
+
 async def _proxy_model_request(
     request: Request,
     *,
@@ -121,12 +149,14 @@ async def _proxy_model_request(
     port = await _ensure_loaded(model_cfg, vram)
     await state.touch(model_cfg.name)
     raw_body = await request.body()
+    content_type = request.headers.get("content-type", "").lower()
+    proxied_body = _rewrite_backend_model(raw_body, model_cfg, content_type)
 
     await increment_active(model_cfg.name)
     try:
         if stream:
-            return await forward_streaming_request(request, port, path, raw_body)
-        return await forward_request(request, port, path, raw_body)
+            return await forward_streaming_request(request, port, path, proxied_body)
+        return await forward_request(request, port, path, proxied_body)
     finally:
         await decrement_active(model_cfg.name)
 
@@ -256,10 +286,13 @@ async def _audio_form_request(
         model_name,
         expected_types={ModelType.transcription},
     )
-    if model_cfg.backend != BackendType.openvino:
+    if model_cfg.backend not in (BackendType.openvino, BackendType.transformers):
         raise HTTPException(
             status_code=400,
-            detail=f"Model '{model_name}' does not use the OpenVINO backend.",
+            detail=(
+                f"Model '{model_name}' does not use a backend that supports "
+                "audio transcription endpoints."
+            ),
         )
     return await _proxy_model_request(
         request,

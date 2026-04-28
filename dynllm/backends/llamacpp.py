@@ -26,7 +26,7 @@ class LlamaCppBackend(Backend):
     """Backend that manages llama-server subprocesses for GGUF models."""
 
     def __init__(self, binary: str = "llama-server") -> None:
-        self._binary = binary
+        self._binary = self._resolve_binary(binary, "backend.llamacpp_binary")
 
     @property
     def backend_type(self) -> BackendType:
@@ -41,6 +41,11 @@ class LlamaCppBackend(Backend):
         model_path = Path(model.path)
         if not model_path.exists():
             raise RuntimeError(f"Model file not found: {model_path}")
+
+        self._binary = self._require_binary(
+            self._binary,
+            "llama-server binary not found. Build/install llama.cpp or set backend.llamacpp_binary to an absolute executable path.",
+        )
 
         cmd = [
             self._binary,

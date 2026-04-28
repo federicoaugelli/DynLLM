@@ -11,7 +11,7 @@ import math
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Optional, Union
+from typing import Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class BackendType(str, Enum):
     llamacpp = "llamacpp"
     openvino = "openvino"
+    transformers = "transformers"
 
 
 class ModelType(str, Enum):
@@ -59,6 +60,13 @@ class ModelConfig(BaseModel):
     # --- OVMS specific ---
     ovms_shape: Optional[str] = None
     """Optional shape hint for OVMS (e.g. 'auto'). Only used by openvino backend."""
+
+    # --- transformers specific ---
+    device: str = "auto"
+    """Target device for transformers backend ('auto', 'cpu', 'cuda', 'xpu')."""
+
+    dtype: str = "auto"
+    """Model dtype for transformers backend ('auto', 'float16', 'bfloat16', 'float32')."""
 
     # --- Idle unload ---
     unload_time: Optional[float] = None
@@ -100,10 +108,33 @@ class ModelConfig(BaseModel):
             raise ValueError("target_device cannot be empty")
         return value
 
+    @field_validator("device")
+    @classmethod
+    def normalize_transformers_device(cls, v: str) -> str:
+        value = v.strip().lower()
+        if not value:
+            raise ValueError("device cannot be empty")
+        return value
+
+    @field_validator("dtype")
+    @classmethod
+    def normalize_transformers_dtype(cls, v: str) -> str:
+        value = v.strip().lower()
+        if not value:
+            raise ValueError("dtype cannot be empty")
+        return value
+
     @model_validator(mode="after")
     def validate_backend_model_type(self) -> "ModelConfig":
         if self.backend == BackendType.llamacpp and self.model_type != ModelType.llm:
             raise ValueError("llamacpp only supports model_type=llm")
+        if self.backend == BackendType.transformers and self.model_type not in (
+            ModelType.llm,
+            ModelType.transcription,
+        ):
+            raise ValueError(
+                "transformers supports model_type=llm and model_type=transcription"
+            )
         return self
 
 
@@ -122,6 +153,9 @@ class BackendConfig(BaseModel):
 
     ovms_binary: str = "ovms"
     """Path or name of the OpenVINO Model Server binary."""
+
+    transformers_binary: str = "transformers"
+    """Path or name of the Hugging Face transformers CLI."""
 
     # Port range allocated to backend subprocesses
     port_range_start: int = 9100

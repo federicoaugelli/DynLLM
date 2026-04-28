@@ -23,6 +23,7 @@ from typing import Optional
 from dynllm.backends.base import Backend
 from dynllm.backends.llamacpp import LlamaCppBackend
 from dynllm.backends.openvino import OpenVINOBackend
+from dynllm.backends.transformers import TransformersBackend
 from dynllm.core.config import BackendType, ModelConfig, Settings
 from dynllm.db.manager import StateManager
 from dynllm.db.models import ModelStatus
@@ -101,6 +102,10 @@ class VRAMManager:
         if BackendType.openvino in settings.enabled_backends:
             self._backends[BackendType.openvino] = OpenVINOBackend(
                 binary=settings.backend.ovms_binary
+            )
+        if BackendType.transformers in settings.enabled_backends:
+            self._backends[BackendType.transformers] = TransformersBackend(
+                binary=settings.backend.transformers_binary
             )
 
         self._ports = PortAllocator(
