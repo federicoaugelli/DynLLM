@@ -16,7 +16,6 @@ import logging
 import shutil
 import signal
 from pathlib import Path
-from typing import Optional
 
 from dynllm.core.config import BackendType, ModelConfig
 

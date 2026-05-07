@@ -11,7 +11,7 @@ unloads idle models after a configurable timeout.
 
 ## Features
 
-- **OpenAI-compatible API** – `/v1/chat/completions`, `/v1/completions`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/speech`, `/v1/models`
+- **OpenAI-compatible API** – `/v1/chat/completions`, `/v1/completions`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/rerank`, `/v1/models`
 - **Dynamic loading** – models are started on first request and stopped when idle
 - **VRAM budgeting** – LIFO eviction keeps total GPU memory within a configured limit
 - **Multi-backend** – supports llama.cpp (GGUF), OpenVINO Model Server (IR), and `transformers serve`
@@ -90,7 +90,7 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `name` | yes | Unique model ID; used as the `model` field in API requests |
 | `path` | yes | Path to the `.gguf` file, OpenVINO IR directory, or local Hugging Face model directory |
 | `backend` | yes | `llamacpp`, `openvino`, or `transformers` |
-| `model_type` | no | `llm`, `transcription`, or `speech`. Default: `llm` |
+| `model_type` | no | `llm`, `transcription`, `speech`, `image_generation`, `embedding`, `rerank`, `classification`, `detection`, `segmentation`, `ocr`. Default: `llm` |
 | `vram_mb` | yes | Estimated VRAM in MB when loaded (used for eviction math) |
 | `target_device` | no | OpenVINO target device (`CPU`, `GPU`, `NPU`). Default: `CPU` |
 | `n_gpu_layers` | no | llama.cpp only – GPU layers (`-1` = all). Default: `-1` |
@@ -245,6 +245,53 @@ curl http://localhost:8000/v1/audio/speech \
   -o speech.wav
 ```
 
+### `POST /v1/images/generations`
+
+OpenAI-compatible image generation endpoint. Supported via OVMS with `model_type: image_generation`.
+
+```bash
+curl http://localhost:8000/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -d '{"model":"sd-xl-ov","prompt":"a cat wearing a hat","n":1,"size":"512x512"}'
+```
+
+### `POST /v1/embeddings`
+
+OpenAI-compatible embeddings endpoint. Supported by llama.cpp (GGUF embedding models) and OVMS.
+
+```bash
+curl http://localhost:8000/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{"model":"bge-m3-gguf","input":"Hello world"}'
+```
+
+### `POST /v1/rerank`
+
+Cohere-compatible reranking endpoint. Supported by llama.cpp (GGUF reranker models) and OVMS.
+
+```bash
+curl http://localhost:8000/v1/rerank \
+  -H "Content-Type: application/json" \
+  -d '{"model":"bge-reranker-v2-gguf","query":"what is AI?","documents":["AI is...","ML is..."]}'
+```
+
+### KServe API (`/v2/models/{name}/...`)
+
+KServe v2 protocol passthrough for OpenVINO models. Supports classification, detection, segmentation, OCR, and other non-LLM models through OVMS.
+
+```bash
+# Model metadata
+curl http://localhost:8000/v2/models/resnet50-vm
+
+# Readiness check
+curl http://localhost:8000/v2/models/resnet50-vm/ready
+
+# Inference
+curl -X POST http://localhost:8000/v2/models/resnet50-vm/infer \
+  -H "Content-Type: application/json" \
+  -d '{"inputs":[...]}'
+```
+
 ### `GET /admin/models`
 
 Returns detailed internal state for every known model (status, port, PID, VRAM, timestamps).
@@ -265,7 +312,7 @@ curl -X POST http://localhost:8000/admin/models/unload \
 
 ### Load on demand
 
-When a `/v1/chat/completions`, `/v1/completions`, or `/v1/audio/*` request arrives:
+When a request arrives for any configured endpoint (`/v1/chat/completions`, `/v1/completions`, `/v1/audio/*`, `/v1/images/generations`, `/v1/embeddings`, `/v1/rerank`, `/v2/models/*`):
 1. DynLLM looks up the model in the config by name.
 2. If not loaded: checks whether enough VRAM is free.
 3. If not enough VRAM: evicts models in **LIFO order** (most recently loaded first),
@@ -347,16 +394,14 @@ lines in `systemd/dynllm.service`.
 
 - Serves **OpenVINO IR** model directories only (not GGUF).
 - One `ovms` process per loaded model.
-- `model_type: llm` uses the standard single-model OVMS config flow.
-- `model_type: transcription` and `model_type: speech` use OVMS audio task mode.
-- Audio endpoints require an OVMS release with OpenAI audio support, such as `2025.4+`.
-- Current OVMS speech-to-text support is limited to `wav` and `mp3` uploads.
+- `model_type: llm`, `model_type: embedding`, and `model_type: rerank` use the standard single-model OVMS config flow with the OpenAI-compatible `/v3/` endpoints (`/v3/chat/completions`, `/v3/embeddings`, `/v1/rerank`).
+- `model_type: transcription` and `model_type: speech` use OVMS audio task mode (`--task speech2text` / `--task text2speech`). Audio endpoints require OVMS `2025.4+`.
+- `model_type: image_generation` uses OVMS image generation task mode (`--task image_generation`) and exposes `/v3/images/generations` (OpenAI-compatible). Supports Stable Diffusion, SDXL, and FLUX.1 models in OpenVINO IR format.
+- `model_type: classification`, `detection`, `segmentation`, and `ocr` are served through the KServe v2 API (`/v2/models/{name}/infer`). These use the standard OVMS config flow and are accessible via any KServe-compatible client.
 - gRPC is disabled (`--port 0`); only the REST API is used.
-- Uses OVMS's OpenAI-compatible `/v3/` endpoints.
-- Readiness is detected in two phases:
-  1. `/v1/config` reports all model versions as `AVAILABLE`.
-  2. A probe request to `/v3/chat/completions` confirms the inference path is live
-      (prevents the 404 that OVMS can return immediately after reporting AVAILABLE).
+- Readiness is detected by model type:
+  - LLM/embedding/rerank/CV models: KServe Model Readiness endpoint (`GET /v2/models/{name}/ready`).
+  - Audio/image generation models: OVMS task mode does not register KServe models, so readiness is detected by probing the relevant `/v3/` endpoint with an OPTIONS request.
 
 ### Hugging Face transformers
 

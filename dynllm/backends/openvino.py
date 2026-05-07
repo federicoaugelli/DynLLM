@@ -33,6 +33,9 @@ _AUDIO_READINESS_PATHS: Final[tuple[str, ...]] = (
     "v3/audio/speech",
     "v3/audio/transcriptions",
 )
+_IMAGE_READINESS_PATHS: Final[tuple[str, ...]] = (
+    "v3/images/generations",
+)
 
 
 class OpenVINOBackend(Backend):
@@ -123,6 +126,8 @@ class OpenVINOBackend(Backend):
             return self._build_audio_command(model, port, model_path, "speech2text")
         if model.model_type == ModelType.speech:
             return self._build_audio_command(model, port, model_path, "text2speech")
+        if model.model_type == ModelType.image_generation:
+            return self._build_image_gen_command(model, port, model_path)
         raise RuntimeError(
             f"Unsupported OpenVINO model_type '{model.model_type.value}' for '{model.name}'"
         )
@@ -162,6 +167,20 @@ class OpenVINOBackend(Backend):
             raise RuntimeError(
                 f"OpenVINO audio model '{model.name}' must point to a directory: {model_path}"
             )
+        return self._build_task_command(model, port, model_path, task)
+
+    def _build_image_gen_command(
+        self, model: ModelConfig, port: int, model_path: Path
+    ) -> list[str]:
+        if not model_path.is_dir():
+            raise RuntimeError(
+                f"OpenVINO image generation model '{model.name}' must point to a directory: {model_path}"
+            )
+        return self._build_task_command(model, port, model_path, "image_generation")
+
+    def _build_task_command(
+        self, model: ModelConfig, port: int, model_path: Path, task: str
+    ) -> list[str]:
         repository_path = model_path.parent
         source_model = model_path.name
         return [
@@ -239,6 +258,13 @@ class OpenVINOBackend(Backend):
                         )
                         return True
                     if resp.status_code == 404 and model_name and model_type != "llm":
+                        if model_type == "image_generation" and await self._image_endpoints_present(client, port):
+                            logger.info(
+                                "OVMS on port %d: image generation model '%s' is ready",
+                                port,
+                                model_name,
+                            )
+                            return True
                         if await self._audio_endpoints_present(client, port):
                             logger.info(
                                 "OVMS on port %d: audio model '%s' is ready",
@@ -268,6 +294,18 @@ class OpenVINOBackend(Backend):
         self, client: httpx.AsyncClient, port: int
     ) -> bool:
         for path in _AUDIO_READINESS_PATHS:
+            try:
+                resp = await client.options(f"http://127.0.0.1:{port}/{path}")
+            except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
+                return False
+            if resp.status_code not in (200, 204, 405):
+                return False
+        return True
+
+    async def _image_endpoints_present(
+        self, client: httpx.AsyncClient, port: int
+    ) -> bool:
+        for path in _IMAGE_READINESS_PATHS:
             try:
                 resp = await client.options(f"http://127.0.0.1:{port}/{path}")
             except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):

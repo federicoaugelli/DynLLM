@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +98,24 @@ class SpeechRequest(BaseModel):
     instructions: Optional[str] = None
     response_format: Optional[str] = None
     speed: Optional[float] = None
+
+    model_config = {"extra": "allow"}
+
+
+# ---------------------------------------------------------------------------
+# Image generation (/v1/images/generations)
+# ---------------------------------------------------------------------------
+
+
+class ImageGenerationRequest(BaseModel):
+    model: str
+    prompt: str
+    n: Optional[int] = None
+    size: Optional[str] = None
+    quality: Optional[str] = None
+    style: Optional[str] = None
+    response_format: Optional[str] = None
+    user: Optional[str] = None
 
     model_config = {"extra": "allow"}
 

@@ -32,6 +32,7 @@ class ModelType(str, Enum):
     detection = "detection"
     segmentation = "segmentation"
     ocr = "ocr"
+    image_generation = "image_generation"
 
 
 class ModelConfig(BaseModel):
@@ -115,6 +116,10 @@ class ModelConfig(BaseModel):
         ):
             raise ValueError(
                 "llamacpp supports model_type=llm, embedding, and rerank"
+            )
+        if self.model_type == ModelType.image_generation and self.backend != BackendType.openvino:
+            raise ValueError(
+                "image_generation is only supported by the openvino backend"
             )
         return self
 

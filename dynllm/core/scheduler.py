@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     from dynllm.db.manager import StateManager
 
 from dynllm.core.vram_manager import get_active_count
-from dynllm.db.models import ModelStatus
 
 logger = logging.getLogger(__name__)
 

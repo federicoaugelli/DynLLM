@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncGenerator, Optional
+from typing import Optional
 
 from sqlmodel import Session, SQLModel, create_engine, select
 

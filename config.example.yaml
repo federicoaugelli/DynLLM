@@ -76,7 +76,8 @@ log_level: "info"   # debug | info | warning | error
 #   backend      – "llamacpp" or "openvino"
 #   model_type   – "llm", "transcription", "speech",
 #                  "embedding", "rerank", "classification",
-#                  "detection", "segmentation", "ocr"
+#                  "detection", "segmentation", "ocr",
+#                  "image_generation"
 #   vram_mb      – estimated VRAM when loaded (used for eviction decisions)
 #   target_device – OpenVINO target device (CPU/GPU/NPU); defaults to CPU
 #
@@ -190,6 +191,17 @@ models:
     model_type: ocr
     target_device: CPU
     vram_mb: 600
+
+  # --- Image generation model (OpenVINO example) ---
+  # Accessible via OpenAI /v1/images/generations
+  # Model must be exported to OpenVINO IR format (use optimum-cli or
+  # download pre-converted from huggingface.co/OpenVINO)
+  - name: "sd-xl-ov"
+    path: "/mnt/models/openvino/stable-diffusion-xl"
+    backend: openvino
+    model_type: image_generation
+    target_device: GPU
+    vram_mb: 4096
 
   # --- Embedding model (OpenVINO example) ---
   # Accessible via OpenAI /v1/embeddings or KServe /v2/models/bge-m3-ov/infer

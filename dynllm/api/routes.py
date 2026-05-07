@@ -16,7 +16,6 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
@@ -30,6 +29,7 @@ from dynllm.api.schemas import (
     ChatCompletionRequest,
     CompletionRequest,
     EmbeddingRequest,
+    ImageGenerationRequest,
     ModelObject,
     ModelStateResponse,
     ModelsResponse,
@@ -126,7 +126,6 @@ async def _proxy_model_request(
     port = await _ensure_loaded(model_cfg, vram)
     await state.touch(model_cfg.name)
     raw_body = await request.body()
-    content_type = request.headers.get("content-type", "").lower()
 
     await increment_active(model_cfg.name)
     try:
@@ -336,6 +335,47 @@ async def audio_speech(
         state=state,
         vram=vram,
         path="v3/audio/speech",
+    )
+
+
+# ---------------------------------------------------------------------------
+# /v1/images/generations
+# ---------------------------------------------------------------------------
+
+
+@router.post("/v1/images/generations")
+async def image_generations(
+    request: Request,
+    body: ImageGenerationRequest,
+    settings: Settings = Depends(get_settings),
+    vram: VRAMManager = Depends(_get_vram),
+    state: StateManager = Depends(_get_state),
+) -> Response:
+    """
+    Proxy an image generation request to the OpenVINO backend.
+
+    Only OpenVINO models with ``model_type: image_generation`` are supported.
+    The request is forwarded to OVMS at ``/v3/images/generations``.
+    """
+    model_cfg = _require_model(
+        settings,
+        body.model,
+        expected_types={ModelType.image_generation},
+    )
+    if model_cfg.backend != BackendType.openvino:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{body.model}' does not use the OpenVINO backend. "
+                "Image generation is only supported via OVMS."
+            ),
+        )
+    return await _proxy_model_request(
+        request,
+        model_cfg=model_cfg,
+        state=state,
+        vram=vram,
+        path="v3/images/generations",
     )
 
 
