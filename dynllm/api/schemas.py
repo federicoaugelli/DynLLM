@@ -103,6 +103,39 @@ class SpeechRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Embeddings (/v1/embeddings)
+# ---------------------------------------------------------------------------
+
+
+class EmbeddingRequest(BaseModel):
+    model: str
+    input: Union[str, list[str], list[list[int]]]
+    encoding_format: Optional[str] = None
+    dimensions: Optional[int] = None
+    user: Optional[str] = None
+
+    model_config = {"extra": "allow"}
+
+
+# ---------------------------------------------------------------------------
+# Reranking (/v1/rerank)
+# ---------------------------------------------------------------------------
+
+# Cohere-compatible rerank request (also supported by llama.cpp & OVMS)
+
+
+class RerankRequest(BaseModel):
+    model: str
+    query: str
+    documents: list[str]
+    top_n: Optional[int] = None
+    max_chunks_per_doc: Optional[int] = None
+    return_documents: Optional[bool] = None
+
+    model_config = {"extra": "allow"}
+
+
+# ---------------------------------------------------------------------------
 # Admin / management (non-OpenAI endpoints)
 # ---------------------------------------------------------------------------
 

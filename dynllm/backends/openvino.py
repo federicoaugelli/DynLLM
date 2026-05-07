@@ -109,7 +109,15 @@ class OpenVINOBackend(Backend):
     def _build_command(
         self, model: ModelConfig, port: int, model_path: Path, temp_dir: Path
     ) -> list[str]:
-        if model.model_type == ModelType.llm:
+        if model.model_type in (
+            ModelType.llm,
+            ModelType.embedding,
+            ModelType.rerank,
+            ModelType.classification,
+            ModelType.detection,
+            ModelType.segmentation,
+            ModelType.ocr,
+        ):
             return self._build_llm_command(model, port, model_path, temp_dir)
         if model.model_type == ModelType.transcription:
             return self._build_audio_command(model, port, model_path, "speech2text")

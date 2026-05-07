@@ -34,7 +34,7 @@ def test_target_device_is_normalized() -> None:
 
 
 def test_llamacpp_rejects_non_llm_model_type() -> None:
-    with pytest.raises(ValueError, match="llamacpp only supports model_type=llm"):
+    with pytest.raises(ValueError, match="llamacpp supports model_type=llm, embedding, and rerank"):
         ModelConfig(
             name="bad-whisper",
             path=Path("/tmp/bad-whisper.gguf"),

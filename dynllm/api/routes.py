@@ -13,7 +13,6 @@ Management endpoints (non-standard):
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
@@ -22,13 +21,19 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from dynllm.api.proxy import forward_request, forward_streaming_request
+from dynllm.api.proxy import (
+    forward_request,
+    forward_kserve_request,
+    forward_streaming_request,
+)
 from dynllm.api.schemas import (
     ChatCompletionRequest,
     CompletionRequest,
+    EmbeddingRequest,
     ModelObject,
     ModelStateResponse,
     ModelsResponse,
+    RerankRequest,
     SpeechRequest,
     UnloadRequest,
 )
@@ -109,34 +114,6 @@ async def _ensure_loaded(model_cfg: ModelConfig, vram: VRAMManager) -> int:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-def _backend_request_model(model_cfg: ModelConfig) -> str:
-    if model_cfg.backend == BackendType.transformers:
-        return str(model_cfg.path)
-    return model_cfg.name
-
-
-def _rewrite_backend_model(raw_body: bytes, model_cfg: ModelConfig, content_type: str) -> bytes:
-    backend_model = _backend_request_model(model_cfg)
-    if backend_model == model_cfg.name:
-        return raw_body
-
-    if "application/json" in content_type:
-        payload = json.loads(raw_body.decode("utf-8"))
-        payload["model"] = backend_model
-        return json.dumps(payload).encode("utf-8")
-
-    if "multipart/form-data" in content_type:
-        return _MULTIPART_MODEL_RE.sub(
-            lambda match: match.group(0).replace(
-                match.group("model"), backend_model.encode("utf-8")
-            ),
-            raw_body,
-            count=1,
-        )
-
-    return raw_body
-
-
 async def _proxy_model_request(
     request: Request,
     *,
@@ -150,13 +127,12 @@ async def _proxy_model_request(
     await state.touch(model_cfg.name)
     raw_body = await request.body()
     content_type = request.headers.get("content-type", "").lower()
-    proxied_body = _rewrite_backend_model(raw_body, model_cfg, content_type)
 
     await increment_active(model_cfg.name)
     try:
         if stream:
-            return await forward_streaming_request(request, port, path, proxied_body)
-        return await forward_request(request, port, path, proxied_body)
+            return await forward_streaming_request(request, port, path, raw_body)
+        return await forward_request(request, port, path, raw_body)
     finally:
         await decrement_active(model_cfg.name)
 
@@ -286,7 +262,7 @@ async def _audio_form_request(
         model_name,
         expected_types={ModelType.transcription},
     )
-    if model_cfg.backend not in (BackendType.openvino, BackendType.transformers):
+    if model_cfg.backend != BackendType.openvino:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -360,6 +336,159 @@ async def audio_speech(
         state=state,
         vram=vram,
         path="v3/audio/speech",
+    )
+
+
+# ---------------------------------------------------------------------------
+# /v1/embeddings
+# ---------------------------------------------------------------------------
+
+
+@router.post("/v1/embeddings")
+async def embeddings(
+    request: Request,
+    body: EmbeddingRequest,
+    settings: Settings = Depends(get_settings),
+    vram: VRAMManager = Depends(_get_vram),
+    state: StateManager = Depends(_get_state),
+) -> Response:
+    """
+    Proxy an embedding request to the appropriate backend.
+
+    Supported backends: llamacpp (``/v1/embeddings``), openvino (``/v3/embeddings``).
+    """
+    model_cfg = _require_model(
+        settings, body.model, expected_types={ModelType.embedding, ModelType.llm}
+    )
+    api_version = "v3" if model_cfg.backend == BackendType.openvino else "v1"
+    path = f"{api_version}/embeddings"
+    return await _proxy_model_request(
+        request,
+        model_cfg=model_cfg,
+        state=state,
+        vram=vram,
+        path=path,
+    )
+
+
+# ---------------------------------------------------------------------------
+# /v1/rerank
+# ---------------------------------------------------------------------------
+
+
+@router.post("/v1/rerank")
+async def rerank(
+    request: Request,
+    body: RerankRequest,
+    settings: Settings = Depends(get_settings),
+    vram: VRAMManager = Depends(_get_vram),
+    state: StateManager = Depends(_get_state),
+) -> Response:
+    """
+    Proxy a rerank request to the appropriate backend.
+
+    Supported backends: llamacpp (``/v1/rerank``), openvino (``/v1/rerank``).
+    """
+    model_cfg = _require_model(
+        settings, body.model, expected_types={ModelType.rerank, ModelType.llm}
+    )
+    # Both llama.cpp and OVMS expose /v1/rerank
+    path = "v1/rerank"
+    return await _proxy_model_request(
+        request,
+        model_cfg=model_cfg,
+        state=state,
+        vram=vram,
+        path=path,
+    )
+
+
+# ---------------------------------------------------------------------------
+# KServe API proxy (passthrough to OVMS)
+#
+# These endpoints proxy the KServe v2 API directly to the OVMS backend,
+# allowing DynLLM to serve any OpenVINO IR model (classification, detection,
+# segmentation, OCR, etc.) through the standard KServe protocol.
+#
+# The model name in the path must match a configured DynLLM model backed by
+# the OpenVINO backend.
+# ---------------------------------------------------------------------------
+
+
+async def _kserve_proxy(
+    request: Request,
+    name: str,
+    kserve_path: str,
+    settings: Settings,
+    vram: VRAMManager,
+    state: StateManager,
+) -> Response:
+    model_cfg = _require_model(
+        settings,
+        name,
+        expected_types={
+            ModelType.llm,
+            ModelType.embedding,
+            ModelType.rerank,
+            ModelType.classification,
+            ModelType.detection,
+            ModelType.segmentation,
+            ModelType.ocr,
+        },
+    )
+    if model_cfg.backend != BackendType.openvino:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{name}' is backed by '{model_cfg.backend.value}', "
+                "which does not expose a KServe API. Only OpenVINO models "
+                "support KServe endpoints."
+            ),
+        )
+    port = await _ensure_loaded(model_cfg, vram)
+    await state.touch(name)
+    await increment_active(name)
+    try:
+        return await forward_kserve_request(request, port, kserve_path)
+    finally:
+        await decrement_active(name)
+
+
+@router.get("/v2/models/{name}")
+async def kserve_model_metadata(
+    request: Request,
+    name: str,
+    settings: Settings = Depends(get_settings),
+    vram: VRAMManager = Depends(_get_vram),
+    state: StateManager = Depends(_get_state),
+) -> Response:
+    """Get KServe model metadata."""
+    return await _kserve_proxy(request, name, f"v2/models/{name}", settings, vram, state)
+
+
+@router.get("/v2/models/{name}/ready")
+async def kserve_model_ready(
+    request: Request,
+    name: str,
+    settings: Settings = Depends(get_settings),
+    vram: VRAMManager = Depends(_get_vram),
+    state: StateManager = Depends(_get_state),
+) -> Response:
+    """Check KServe model readiness."""
+    return await _kserve_proxy(request, name, f"v2/models/{name}/ready", settings, vram, state)
+
+
+@router.post("/v2/models/{name}/infer")
+async def kserve_model_infer(
+    request: Request,
+    name: str,
+    settings: Settings = Depends(get_settings),
+    vram: VRAMManager = Depends(_get_vram),
+    state: StateManager = Depends(_get_state),
+) -> Response:
+    """Run inference via KServe API (passthrough to OVMS)."""
+    return await _kserve_proxy(
+        request, name, f"v2/models/{name}/infer", settings, vram, state
     )
 
 

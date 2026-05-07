@@ -14,7 +14,7 @@ from pathlib import Path
 import httpx
 
 from dynllm.backends.base import Backend
-from dynllm.core.config import BackendType, ModelConfig
+from dynllm.core.config import BackendType, ModelConfig, ModelType
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,11 @@ class LlamaCppBackend(Backend):
             # Prevent llama-server from printing noisy startup info to stderr
             "--log-disable",
         ]
+
+        if model.model_type == ModelType.embedding:
+            cmd.extend(["--embedding", "--pooling", "mean"])
+        elif model.model_type == ModelType.rerank:
+            cmd.extend(["--reranking"])
 
         logger.info(
             "Starting llama-server for model '%s' on port %d: %s",

@@ -137,3 +137,53 @@ async def forward_streaming_request(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+async def forward_kserve_request(
+    request: Request,
+    port: int,
+    path: str,
+) -> Response:
+    """
+    Passthrough proxy for KServe API requests (``/v2/models/<name>/...``).
+
+    Forwards the request verbatim without any body rewriting.
+    Supports both POST (infer) and GET (metadata, readiness) methods.
+    """
+    headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower() not in ("host", "content-length")
+    }
+
+    url = _backend_url(port, path)
+    method = request.method
+    raw_body = await request.body()
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=_CONNECT_TIMEOUT, read=_READ_TIMEOUT, write=30.0, pool=5.0)
+    ) as client:
+        resp = await client.request(
+            method,
+            url,
+            headers=headers,
+            content=raw_body,
+        )
+
+    response_headers = {
+        k: v
+        for k, v in resp.headers.items()
+        if k.lower()
+        not in (
+            "transfer-encoding",
+            "content-encoding",
+            "content-length",
+        )
+    }
+
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        headers=response_headers,
+        media_type=resp.headers.get("content-type"),
+    )
