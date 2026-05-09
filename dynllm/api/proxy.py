@@ -88,15 +88,6 @@ async def forward_request(
         )
     }
 
-    if resp.status_code >= 400:
-        logger.warning(
-            "Backend returned %d for %s %s: %s",
-            resp.status_code,
-            method,
-            url,
-            resp.text[:2000],
-        )
-
     return Response(
         content=resp.content,
         status_code=resp.status_code,
