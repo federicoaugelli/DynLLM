@@ -13,6 +13,7 @@ Management endpoints (non-standard):
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -114,6 +115,25 @@ async def _ensure_loaded(model_cfg: ModelConfig, vram: VRAMManager) -> int:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+def _sanitise_body_for_ovms(body: bytes) -> bytes:
+    """
+    OVMS 2026.1 requires ``n`` to be a positive integer in chat/completion
+    requests.  If the body is valid JSON and ``n`` is absent, null,
+    or <= 0, inject ``"n": 1`` so that OVMS does not reject the request.
+    """
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        return body
+    if not isinstance(data, dict):
+        return body
+    n = data.get("n")
+    if n is None or not isinstance(n, int) or n < 1:
+        data["n"] = 1
+        return json.dumps(data, separators=(",", ":")).encode()
+    return body
+
+
 async def _proxy_model_request(
     request: Request,
     *,
@@ -126,6 +146,8 @@ async def _proxy_model_request(
     port = await _ensure_loaded(model_cfg, vram)
     await state.touch(model_cfg.name)
     raw_body = await request.body()
+    if model_cfg.backend == BackendType.openvino:
+        raw_body = _sanitise_body_for_ovms(raw_body)
 
     await increment_active(model_cfg.name)
     try:
