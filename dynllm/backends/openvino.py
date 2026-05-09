@@ -45,6 +45,7 @@ class OpenVINOBackend(Backend):
         self._binary = self._resolve_binary(binary, "backend.ovms_binary")
         # Keep a reference to temp dirs so they are not GC'd while the server runs
         self._temp_dirs: dict[int, tempfile.TemporaryDirectory] = {}  # pid -> tmpdir
+        self._stderr_tasks: dict[int, asyncio.Task[None]] = {}  # pid -> stderr reader task
 
     @property
     def backend_type(self) -> BackendType:
@@ -88,12 +89,31 @@ class OpenVINOBackend(Backend):
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
+
+        async def _log_stderr() -> None:
+            assert proc.stderr is not None
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                logger.info(
+                    "OVMS [%s]: %s",
+                    model.name,
+                    line.decode(errors="replace").rstrip("\n"),
+                )
+
+        stderr_task = asyncio.ensure_future(_log_stderr())
+        self._stderr_tasks[proc.pid] = stderr_task
 
         # Brief wait to detect immediate crashes
         try:
             await asyncio.wait_for(proc.wait(), timeout=1.5)
+            try:
+                await stderr_task
+            except asyncio.CancelledError:
+                pass
             _, stderr_bytes = await proc.communicate()
             err = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
             tmpdir.cleanup()
@@ -210,6 +230,11 @@ class OpenVINOBackend(Backend):
         """Terminate the OVMS process with *pid* and clean up its temp config."""
         logger.info("Stopping OVMS PID %d", pid)
         await self._terminate_pid(pid)
+
+        # Cancel stderr reader
+        stderr_task = self._stderr_tasks.pop(pid, None)
+        if stderr_task is not None:
+            stderr_task.cancel()
 
         # Clean up temp config directory
         tmpdir = self._temp_dirs.pop(pid, None)
