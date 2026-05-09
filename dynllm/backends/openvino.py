@@ -112,8 +112,13 @@ class OpenVINOBackend(Backend):
     def _build_command(
         self, model: ModelConfig, port: int, model_path: Path, temp_dir: Path
     ) -> list[str]:
+        if model.model_type == ModelType.llm:
+            if not model_path.is_dir():
+                raise RuntimeError(
+                    f"OpenVINO LLM model '{model.name}' must point to a directory: {model_path}"
+                )
+            return self._build_task_command(model, port, model_path, "text_generation")
         if model.model_type in (
-            ModelType.llm,
             ModelType.embedding,
             ModelType.rerank,
             ModelType.classification,
