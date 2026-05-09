@@ -158,10 +158,6 @@ class OpenVINOBackend(Backend):
             str(port),
             "--port",
             "0",
-            "--task",
-            "text_generation",
-            "--target_device",
-            model.target_device or "GPU",
         ]
 
     def _build_audio_command(

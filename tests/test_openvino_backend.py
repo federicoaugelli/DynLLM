@@ -21,9 +21,7 @@ def test_llm_command_uses_config_file_for_target_device(tmp_path: Path) -> None:
     cmd = backend._build_llm_command(model, 9101, model.path, tmp_path)
 
     assert "--config_path" in cmd
-    assert "--task" in cmd
-    assert cmd[cmd.index("--task") + 1] == "text_generation"
-    assert cmd[cmd.index("--target_device") + 1] == "GPU"
+    assert "--target_device" not in cmd
 
     config_path = Path(cmd[cmd.index("--config_path") + 1])
     config = json.loads(config_path.read_text())
