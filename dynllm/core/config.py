@@ -67,6 +67,26 @@ class ModelConfig(BaseModel):
     ovms_shape: Optional[str] = None
     """Optional shape hint for OVMS (e.g. 'auto'). Only used by openvino backend."""
 
+    tool_parser: Optional[str] = None
+    """
+    Type of parser to use for tool calls extraction from model output.
+    Only used by the openvino backend for LLM models.
+    Supported values: llama3, hermes3, phi4, mistral, gptoss, qwen3coder, devstral, lfm2
+    """
+
+    reasoning_parser: Optional[str] = None
+    """
+    Type of parser to use for reasoning content extraction from model output.
+    Only used by the openvino backend for LLM models.
+    Supported values: qwen3, gptoss
+    """
+
+    enable_tool_guided_generation: Optional[bool] = None
+    """
+    When enabled, the model will be guided to follow the tool call schema during generation.
+    Only used by the openvino backend for LLM models.
+    """
+
     # --- Idle unload ---
     unload_time: Optional[float] = None
     """

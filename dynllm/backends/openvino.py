@@ -188,7 +188,7 @@ class OpenVINOBackend(Backend):
     ) -> list[str]:
         repository_path = model_path.parent
         source_model = model_path.name
-        return [
+        cmd = [
             self._binary,
             "--rest_port",
             str(port),
@@ -205,6 +205,13 @@ class OpenVINOBackend(Backend):
             "--target_device",
             model.target_device,
         ]
+        if model.tool_parser:
+            cmd.extend(["--tool_parser", model.tool_parser])
+        if model.reasoning_parser:
+            cmd.extend(["--reasoning_parser", model.reasoning_parser])
+        if model.enable_tool_guided_generation is not None:
+            cmd.extend(["--enable_tool_guided_generation", str(model.enable_tool_guided_generation).lower()])
+        return cmd
 
     async def stop(self, pid: int) -> None:
         """Terminate the OVMS process with *pid* and clean up its temp config."""

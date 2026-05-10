@@ -88,6 +88,14 @@ log_level: "info"   # debug | info | warning | error
 # OpenVINO extra fields:
 #   ovms_shape    – optional shape hint (e.g. "auto")
 #
+# OpenVINO LLM extra fields (tool calling / reasoning):
+#   tool_parser                   – parser for tool call extraction
+#                                   (llama3, hermes3, phi4, mistral,
+#                                    gptoss, qwen3coder, devstral, lfm2)
+#   reasoning_parser              – parser for reasoning content extraction
+#                                   (qwen3, gptoss)
+#   enable_tool_guided_generation – guide the model to follow tool schema (true/false)
+#
 # Per-model idle timeout (optional):
 #   unload_time   – seconds of inactivity before auto-unload.
 #                   Overrides the global idle_timeout_seconds for this model.
@@ -114,7 +122,7 @@ models:
     context_size: 8192
     # unload_time: -1      # never auto-unload
 
-  # --- OpenVINO (IR) example ---
+  # --- OpenVINO (IR) examples ---
   - name: "phi3-mini-ov"
     path: "/mnt/models/openvino/phi-3-mini-4k-instruct-ov"
     backend: openvino
@@ -123,6 +131,38 @@ models:
     vram_mb: 4096
     ovms_shape: "auto"
     # unload_time: inf     # never auto-unload
+
+  # --- OpenVINO LLM with tool calling support ---
+
+  # GPT-OSS requires BOTH tool_parser AND reasoning_parser set to "gptoss"
+  - name: "gpt-oss"
+    path: "/mnt/models/openvino/gpt-oss-20b-int4-ov"
+    backend: openvino
+    model_type: llm
+    target_device: GPU
+    vram_mb: 12000
+    tool_parser: gptoss
+    reasoning_parser: gptoss
+
+  # Qwen3 models typically use hermes3 tool parser (optional: + reasoning_parser qwen3)
+  - name: "qwen3-4b"
+    path: "/mnt/models/openvino/Qwen3-4B-int4-ov"
+    backend: openvino
+    model_type: llm
+    target_device: GPU
+    vram_mb: 4096
+    tool_parser: hermes3
+    reasoning_parser: qwen3
+
+  # Phi-4-mini with tool-guided generation
+  - name: "phi4-mini"
+    path: "/mnt/models/openvino/Phi-4-mini-instruct-int4-ov"
+    backend: openvino
+    model_type: llm
+    target_device: GPU
+    vram_mb: 4096
+    tool_parser: phi4
+    enable_tool_guided_generation: true
 
   - name: "whisper-large-v3-ov"
     path: "/mnt/models/openvino/whisper-large-v3-ov"
