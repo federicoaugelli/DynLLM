@@ -61,3 +61,190 @@ def test_non_llm_command_uses_config_file(tmp_path: Path) -> None:
     assert model_config["name"] == "bge-embed"
     assert model_config["base_path"] == str(model.path)
     assert model_config["target_device"] == "GPU"
+
+
+def test_speculative_decoding_flag(tmp_path: Path) -> None:
+    backend = OpenVINOBackend(binary="ovms")
+    model_dir = tmp_path / "OpenVINO" / "codellama"
+    model_dir.mkdir(parents=True)
+    draft_dir = tmp_path / "draft"
+    draft_dir.mkdir()
+
+    model = ModelConfig(
+        name="codellama-7b",
+        path=model_dir,
+        backend=BackendType.openvino,
+        vram_mb=12000,
+        target_device="GPU",
+        model_type=ModelType.llm,
+        draft_model=draft_dir,
+        draft_model_vram_mb=500,
+    )
+
+    cmd = backend._build_command(model, 9101, model.path, tmp_path)
+
+    assert "--draft_source_model" in cmd
+    assert cmd[cmd.index("--draft_source_model") + 1] == str(draft_dir)
+
+
+def test_kv_cache_optimization_flags(tmp_path: Path) -> None:
+    backend = OpenVINOBackend(binary="ovms")
+    model_dir = tmp_path / "OpenVINO" / "test-model"
+    model_dir.mkdir(parents=True)
+
+    model = ModelConfig(
+        name="test-model",
+        path=model_dir,
+        backend=BackendType.openvino,
+        vram_mb=4096,
+        target_device="GPU",
+        model_type=ModelType.llm,
+        kv_cache_precision="u8",
+        cache_size=8,
+        enable_prefix_caching=True,
+    )
+
+    cmd = backend._build_command(model, 9101, model.path, tmp_path)
+
+    assert "--kv_cache_precision" in cmd
+    assert cmd[cmd.index("--kv_cache_precision") + 1] == "u8"
+    assert "--cache_size" in cmd
+    assert cmd[cmd.index("--cache_size") + 1] == "8"
+    assert "--enable_prefix_caching" in cmd
+    assert cmd[cmd.index("--enable_prefix_caching") + 1] == "true"
+
+
+def test_scheduling_flags(tmp_path: Path) -> None:
+    backend = OpenVINOBackend(binary="ovms")
+    model_dir = tmp_path / "OpenVINO" / "test-model"
+    model_dir.mkdir(parents=True)
+
+    model = ModelConfig(
+        name="test-model",
+        path=model_dir,
+        backend=BackendType.openvino,
+        vram_mb=4096,
+        target_device="GPU",
+        model_type=ModelType.llm,
+        max_num_seqs=128,
+        max_num_batched_tokens=4096,
+        dynamic_split_fuse=False,
+    )
+
+    cmd = backend._build_command(model, 9101, model.path, tmp_path)
+
+    assert "--max_num_seqs" in cmd
+    assert cmd[cmd.index("--max_num_seqs") + 1] == "128"
+    assert "--max_num_batched_tokens" in cmd
+    assert cmd[cmd.index("--max_num_batched_tokens") + 1] == "4096"
+    assert "--dynamic_split_fuse" in cmd
+    assert cmd[cmd.index("--dynamic_split_fuse") + 1] == "false"
+
+
+def test_model_distribution_flag(tmp_path: Path) -> None:
+    backend = OpenVINOBackend(binary="ovms")
+    model_dir = tmp_path / "OpenVINO" / "test-model"
+    model_dir.mkdir(parents=True)
+
+    model = ModelConfig(
+        name="test-model",
+        path=model_dir,
+        backend=BackendType.openvino,
+        vram_mb=48000,
+        target_device="CPU",
+        model_type=ModelType.llm,
+        model_distribution_policy="TENSOR_PARALLEL",
+    )
+
+    cmd = backend._build_command(model, 9101, model.path, tmp_path)
+
+    assert "--model_distribution_policy" in cmd
+    assert cmd[cmd.index("--model_distribution_policy") + 1] == "TENSOR_PARALLEL"
+
+
+def test_all_optimization_flags_together(tmp_path: Path) -> None:
+    backend = OpenVINOBackend(binary="ovms")
+    model_dir = tmp_path / "OpenVINO" / "full-opt"
+    model_dir.mkdir(parents=True)
+    draft_dir = tmp_path / "draft"
+    draft_dir.mkdir()
+
+    model = ModelConfig(
+        name="full-opt",
+        path=model_dir,
+        backend=BackendType.openvino,
+        vram_mb=12000,
+        target_device="GPU",
+        model_type=ModelType.llm,
+        draft_model=draft_dir,
+        draft_model_vram_mb=500,
+        kv_cache_precision="u8",
+        cache_size=8,
+        enable_prefix_caching=True,
+        max_num_seqs=128,
+        max_num_batched_tokens=4096,
+        dynamic_split_fuse=True,
+        model_distribution_policy="PIPELINE_PARALLEL",
+        tool_parser="hermes3",
+        reasoning_parser="qwen3",
+        enable_tool_guided_generation=True,
+    )
+
+    cmd = backend._build_command(model, 9101, model.path, tmp_path)
+
+    # Speculative decoding
+    assert "--draft_source_model" in cmd
+    assert cmd[cmd.index("--draft_source_model") + 1] == str(draft_dir)
+
+    # KV cache
+    assert "--kv_cache_precision" in cmd
+    assert cmd[cmd.index("--kv_cache_precision") + 1] == "u8"
+    assert "--cache_size" in cmd
+    assert cmd[cmd.index("--cache_size") + 1] == "8"
+    assert "--enable_prefix_caching" in cmd
+    assert cmd[cmd.index("--enable_prefix_caching") + 1] == "true"
+
+    # Scheduling
+    assert "--max_num_seqs" in cmd
+    assert cmd[cmd.index("--max_num_seqs") + 1] == "128"
+    assert "--max_num_batched_tokens" in cmd
+    assert cmd[cmd.index("--max_num_batched_tokens") + 1] == "4096"
+    assert "--dynamic_split_fuse" in cmd
+    assert cmd[cmd.index("--dynamic_split_fuse") + 1] == "true"
+
+    # Distribution
+    assert "--model_distribution_policy" in cmd
+    assert cmd[cmd.index("--model_distribution_policy") + 1] == "PIPELINE_PARALLEL"
+
+    # Existing tool/reasoning flags
+    assert "--tool_parser" in cmd
+    assert "--reasoning_parser" in cmd
+    assert "--enable_tool_guided_generation" in cmd
+    assert cmd[cmd.index("--enable_tool_guided_generation") + 1] == "true"
+
+
+def test_non_llm_model_rejects_optimization_flags(tmp_path: Path) -> None:
+    """Optimization flags must be rejected for non-LLM models."""
+    import pytest
+
+    with pytest.raises(ValueError, match="kv_cache_precision"):
+        ModelConfig(
+            name="bad-model",
+            path=Path("/models/test"),
+            backend=BackendType.openvino,
+            vram_mb=1024,
+            target_device="CPU",
+            model_type=ModelType.embedding,
+            kv_cache_precision="u8",
+        )
+
+    with pytest.raises(ValueError, match="draft_model"):
+        ModelConfig(
+            name="bad-model",
+            path=Path("/models/test"),
+            backend=BackendType.openvino,
+            vram_mb=1024,
+            target_device="CPU",
+            model_type=ModelType.embedding,
+            draft_model=Path("/draft"),
+        )

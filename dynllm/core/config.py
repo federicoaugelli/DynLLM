@@ -87,6 +87,80 @@ class ModelConfig(BaseModel):
     Only used by the openvino backend for LLM models.
     """
 
+    # --- OpenVINO Speculative Decoding ---
+    draft_model: Optional[Path] = None
+    """
+    Path to the draft model directory (OpenVINO IR) for speculative decoding.
+    The draft model must share the same tokenizer as the main model.
+    A smaller draft model generates token proposals that the main model validates,
+    speeding up inference especially at low concurrency.
+    Only used by the openvino backend for LLM models.
+    """
+
+    draft_model_vram_mb: Optional[int] = Field(default=None, ge=0)
+    """
+    Additional VRAM consumed by the draft model in megabytes.
+    This is added to ``vram_mb`` for eviction decisions.
+    Only used when ``draft_model`` is also set.
+    """
+
+    # --- OpenVINO KV Cache Optimization ---
+    kv_cache_precision: Optional[str] = None
+    """
+    KV cache precision. Set to ``"u8"`` to reduce KV cache memory consumption
+    by using unsigned 8-bit integers instead of the default float32.
+    Only used by the openvino backend for LLM models.
+    """
+
+    cache_size: Optional[int] = Field(default=None, ge=0)
+    """
+    KV cache size in gigabytes. Controls how much memory is allocated for
+    the KV cache. Default (0) uses dynamic allocation. Recommended to start
+    at 10 GB and adjust based on server logs.
+    Only used by the openvino backend for LLM models.
+    """
+
+    enable_prefix_caching: Optional[bool] = None
+    """
+    Enable prompt prefix caching. When enabled, repeated prompt prefixes
+    (e.g., system prompts) reuse cached KV entries, avoiding redundant
+    prefill computation. Enabled by default in OVMS.
+    Only used by the openvino backend for LLM models.
+    """
+
+    # --- OpenVINO Scheduling / Batching ---
+    max_num_seqs: Optional[int] = Field(default=None, ge=1)
+    """
+    Maximum number of sequences processed simultaneously in a single batch.
+    Higher values increase throughput at the cost of more KV cache memory.
+    Default in OVMS: 256.
+    Only used by the openvino backend for LLM models.
+    """
+
+    max_num_batched_tokens: Optional[int] = Field(default=None, ge=1)
+    """
+    Maximum number of tokens (prefill + decode) that can be batched together
+    in a single scheduler step.
+    Only used by the openvino backend for LLM models.
+    """
+
+    dynamic_split_fuse: Optional[bool] = None
+    """
+    Enable the dynamic split-fuse scheduling algorithm, which splits prefill
+    and decode operations across batches to maximise GPU utilisation.
+    Enabled by default in OVMS.
+    Only used by the openvino backend for LLM models.
+    """
+
+    # --- OpenVINO Multi-device ---
+    model_distribution_policy: Optional[str] = None
+    """
+    Model distribution policy for multi-socket or multi-GPU setups.
+    ``"TENSOR_PARALLEL"`` splits individual tensors across devices.
+    ``"PIPELINE_PARALLEL"`` distributes different layers across devices.
+    Only used by the openvino backend for LLM models.
+    """
+
     # --- Idle unload ---
     unload_time: Optional[float] = None
     """
@@ -127,6 +201,38 @@ class ModelConfig(BaseModel):
             raise ValueError("target_device cannot be empty")
         return value
 
+    @field_validator("kv_cache_precision", mode="before")
+    @classmethod
+    def validate_kv_cache_precision(cls, v: object) -> Optional[str]:
+        if v is None:
+            return None
+        val = str(v)
+        if val not in ("u8",):
+            raise ValueError(
+                f"kv_cache_precision must be 'u8' or None, got '{val}'"
+            )
+        return val
+
+    @field_validator("model_distribution_policy", mode="before")
+    @classmethod
+    def validate_model_distribution_policy(cls, v: object) -> Optional[str]:
+        if v is None:
+            return None
+        val = str(v).strip().upper()
+        if val not in ("TENSOR_PARALLEL", "PIPELINE_PARALLEL"):
+            raise ValueError(
+                f"model_distribution_policy must be 'TENSOR_PARALLEL', "
+                f"'PIPELINE_PARALLEL', or None, got '{v}'"
+            )
+        return val
+
+    @field_validator("draft_model", mode="before")
+    @classmethod
+    def expand_draft_model_path(cls, v: object) -> Optional[Path]:
+        if v is None:
+            return None
+        return Path(str(v)).expanduser()
+
     @model_validator(mode="after")
     def validate_backend_model_type(self) -> "ModelConfig":
         if self.backend == BackendType.llamacpp and self.model_type not in (
@@ -141,6 +247,52 @@ class ModelConfig(BaseModel):
             raise ValueError(
                 "image_generation is only supported by the openvino backend"
             )
+        if self.backend == BackendType.openvino and self.model_type == ModelType.llm:
+            if self.draft_model is not None and not self.draft_model.is_dir():
+                raise ValueError(
+                    f"draft_model must be a directory, got '{self.draft_model}'"
+                )
+            if self.draft_model_vram_mb is not None and self.draft_model is None:
+                raise ValueError(
+                    "draft_model_vram_mb requires draft_model to be set"
+                )
+        else:
+            if self.draft_model is not None:
+                raise ValueError(
+                    "draft_model is only supported for openvino backend with model_type=llm"
+                )
+            if self.draft_model_vram_mb is not None:
+                raise ValueError(
+                    "draft_model_vram_mb is only supported for openvino backend with model_type=llm"
+                )
+            if self.kv_cache_precision is not None:
+                raise ValueError(
+                    "kv_cache_precision is only supported for openvino backend with model_type=llm"
+                )
+            if self.cache_size is not None:
+                raise ValueError(
+                    "cache_size is only supported for openvino backend with model_type=llm"
+                )
+            if self.enable_prefix_caching is not None:
+                raise ValueError(
+                    "enable_prefix_caching is only supported for openvino backend with model_type=llm"
+                )
+            if self.max_num_seqs is not None:
+                raise ValueError(
+                    "max_num_seqs is only supported for openvino backend with model_type=llm"
+                )
+            if self.max_num_batched_tokens is not None:
+                raise ValueError(
+                    "max_num_batched_tokens is only supported for openvino backend with model_type=llm"
+                )
+            if self.dynamic_split_fuse is not None:
+                raise ValueError(
+                    "dynamic_split_fuse is only supported for openvino backend with model_type=llm"
+                )
+            if self.model_distribution_policy is not None:
+                raise ValueError(
+                    "model_distribution_policy is only supported for openvino backend with model_type=llm"
+                )
         return self
 
 

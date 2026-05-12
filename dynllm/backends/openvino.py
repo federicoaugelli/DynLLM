@@ -211,6 +211,31 @@ class OpenVINOBackend(Backend):
             cmd.extend(["--reasoning_parser", model.reasoning_parser])
         if model.enable_tool_guided_generation is not None:
             cmd.extend(["--enable_tool_guided_generation", str(model.enable_tool_guided_generation).lower()])
+
+        # Speculative decoding
+        if model.draft_model:
+            cmd.extend(["--draft_source_model", str(model.draft_model)])
+
+        # KV cache optimization
+        if model.kv_cache_precision:
+            cmd.extend(["--kv_cache_precision", model.kv_cache_precision])
+        if model.cache_size is not None:
+            cmd.extend(["--cache_size", str(model.cache_size)])
+        if model.enable_prefix_caching is not None:
+            cmd.extend(["--enable_prefix_caching", str(model.enable_prefix_caching).lower()])
+
+        # Scheduling / Batching
+        if model.max_num_seqs is not None:
+            cmd.extend(["--max_num_seqs", str(model.max_num_seqs)])
+        if model.max_num_batched_tokens is not None:
+            cmd.extend(["--max_num_batched_tokens", str(model.max_num_batched_tokens)])
+        if model.dynamic_split_fuse is not None:
+            cmd.extend(["--dynamic_split_fuse", str(model.dynamic_split_fuse).lower()])
+
+        # Multi-device distribution
+        if model.model_distribution_policy:
+            cmd.extend(["--model_distribution_policy", model.model_distribution_policy])
+
         return cmd
 
     async def stop(self, pid: int) -> None:

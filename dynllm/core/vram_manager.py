@@ -112,6 +112,10 @@ class VRAMManager:
     # Public API
     # ------------------------------------------------------------------
 
+    def _total_vram_mb(self, model: ModelConfig) -> int:
+        """Return total VRAM required for the model, including draft model."""
+        return model.vram_mb + (model.draft_model_vram_mb or 0)
+
     async def ensure_loaded(self, model: ModelConfig) -> int:
         """
         Ensure *model* is loaded and ready, returning its listening port.
@@ -145,7 +149,7 @@ class VRAMManager:
                 )
 
             # Free enough VRAM for the new model
-            await self._evict_for(model.vram_mb)
+            await self._evict_for(self._total_vram_mb(model))
 
             # Load the model
             port = await self._load(model)
@@ -217,7 +221,7 @@ class VRAMManager:
         port = await self._ports.allocate()
         load_order = await self._state.next_load_order()
 
-        await self._state.set_loading(model.name, model.backend.value, model.vram_mb)
+        await self._state.set_loading(model.name, model.backend.value, self._total_vram_mb(model))
 
         try:
             pid = await backend.start(model, port)
@@ -241,11 +245,12 @@ class VRAMManager:
 
         await self._state.set_loaded(model.name, pid, port, load_order)
         logger.info(
-            "Model '%s' loaded on port %d (PID %d, VRAM %d MB)",
+            "Model '%s' loaded on port %d (PID %d, VRAM %d MB%s)",
             model.name,
             port,
             pid,
-            model.vram_mb,
+            self._total_vram_mb(model),
+            f" + {model.draft_model_vram_mb} MB draft" if model.draft_model_vram_mb else "",
         )
         return port
 

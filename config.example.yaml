@@ -96,6 +96,28 @@ log_level: "info"   # debug | info | warning | error
 #                                   (qwen3, gptoss)
 #   enable_tool_guided_generation – guide the model to follow tool schema (true/false)
 #
+# OpenVINO LLM speculative decoding:
+#   draft_model      – path to a smaller OpenVINO IR draft model directory.
+#                      The draft model predicts tokens that the main model
+#                      validates, speeding up inference at low concurrency.
+#                      Must use the same tokenizer as the main model.
+#   draft_model_vram_mb – extra VRAM consumed by the draft model (MB).
+#                      Added to vram_mb for eviction decisions.
+#
+# OpenVINO LLM KV cache optimization:
+#   kv_cache_precision  – set to "u8" for 8-bit KV cache (halves memory)
+#   cache_size          – fixed KV cache size in GB (default: dynamic)
+#   enable_prefix_caching – cache repeated prompt prefixes (default: true)
+#
+# OpenVINO LLM scheduling / batching:
+#   max_num_seqs         – max sequences processed together (default: 256)
+#   max_num_batched_tokens – max tokens in a single scheduler step
+#   dynamic_split_fuse   – split prefill/decode across batches (default: true)
+#
+# OpenVINO LLM multi-device:
+#   model_distribution_policy – "TENSOR_PARALLEL" or "PIPELINE_PARALLEL"
+#                               for multi-socket/multi-GPU setups
+#
 # Per-model idle timeout (optional):
 #   unload_time   – seconds of inactivity before auto-unload.
 #                   Overrides the global idle_timeout_seconds for this model.
@@ -242,6 +264,36 @@ models:
     model_type: image_generation
     target_device: GPU
     vram_mb: 4096
+
+  # --- OpenVINO LLM with speculative decoding and KV cache optimization ---
+  # Uses a small draft model to speed up token generation.
+  # KV cache is quantized to u8 to reduce memory.
+  - name: "codellama-7b-sd"
+    path: "/mnt/models/openvino/codellama-7b-instruct-ov"
+    backend: openvino
+    model_type: llm
+    target_device: GPU
+    vram_mb: 12000
+    draft_model: "/mnt/models/openvino/llama-135m-draft-ov"
+    draft_model_vram_mb: 500
+    kv_cache_precision: u8
+    cache_size: 8
+    enable_prefix_caching: true
+    max_num_seqs: 128
+    # unload_time: 600
+
+  # --- OpenVINO LLM with custom batching and multi-device distribution ---
+  - name: "llama3-70b-ov"
+    path: "/mnt/models/openvino/llama3-70b-ov"
+    backend: openvino
+    model_type: llm
+    target_device: CPU
+    vram_mb: 48000
+    max_num_seqs: 256
+    max_num_batched_tokens: 8192
+    dynamic_split_fuse: true
+    cache_size: 32
+    # model_distribution_policy: TENSOR_PARALLEL   # for multi-socket
 
   # --- Embedding model (OpenVINO example) ---
   # Accessible via OpenAI /v1/embeddings or KServe /v2/models/bge-m3-ov/infer
