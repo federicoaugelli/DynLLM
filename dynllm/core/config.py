@@ -248,10 +248,6 @@ class ModelConfig(BaseModel):
                 "image_generation is only supported by the openvino backend"
             )
         if self.backend == BackendType.openvino and self.model_type == ModelType.llm:
-            if self.draft_model is not None and not self.draft_model.is_dir():
-                raise ValueError(
-                    f"draft_model must be a directory, got '{self.draft_model}'"
-                )
             if self.draft_model_vram_mb is not None and self.draft_model is None:
                 raise ValueError(
                     "draft_model_vram_mb requires draft_model to be set"

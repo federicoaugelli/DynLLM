@@ -246,5 +246,5 @@ def test_non_llm_model_rejects_optimization_flags(tmp_path: Path) -> None:
             vram_mb=1024,
             target_device="CPU",
             model_type=ModelType.embedding,
-            draft_model=Path("/draft"),
+            draft_model=Path("some/relative/path"),
         )
