@@ -2,7 +2,7 @@
 Basic backend availability checker.
 
 Checks whether the configured backend binaries are available on PATH.
-If a binary is missing the user is warned but startup is NOT aborted –
+If a binary is missing the user is warned but startup is NOT aborted —
 they may only use the backends whose binaries are present, or may have
 both binaries but not listed certain backends in enabled_backends.
 
@@ -39,7 +39,48 @@ _INSTALL_HINTS: dict[BackendType, str] = {
         "    https://github.com/openvinotoolkit/model_server\n"
         "  Or set 'backend.ovms_binary' in your config to the full path."
     ),
+    BackendType.transformers: (
+        "transformers CLI not found on PATH.\n"
+        "  Install the serving extras into your DynLLM environment:\n"
+        "    uv pip install \"transformers[serving]\"\n"
+        "  For Intel GPUs, install torch with XPU wheels first:\n"
+        "    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu\n"
+        "  Then set 'backend.transformers_binary' if the CLI is outside PATH."
+    ),
 }
+
+
+def detect_execution_backends() -> list[str]:
+    """Return the torch execution backends available in this environment."""
+    backends = ["cpu"]
+    try:
+        import torch
+    except Exception:
+        return backends
+
+    checks = [
+        ("cuda", getattr(torch, "cuda", None)),
+        ("xpu", getattr(torch, "xpu", None)),
+    ]
+    for name, module in checks:
+        is_available = getattr(module, "is_available", None)
+        if callable(is_available):
+            try:
+                if is_available():
+                    backends.append(name)
+            except Exception:
+                continue
+
+    mps_backend = getattr(getattr(torch, "backends", None), "mps", None)
+    mps_available = getattr(mps_backend, "is_available", None)
+    if callable(mps_available):
+        try:
+            if mps_available():
+                backends.append("mps")
+        except Exception:
+            pass
+
+    return backends
 
 
 def check_backends(settings: Settings) -> None:
@@ -52,6 +93,7 @@ def check_backends(settings: Settings) -> None:
     binary_map: dict[BackendType, str] = {
         BackendType.llamacpp: settings.backend.llamacpp_binary,
         BackendType.openvino: settings.backend.ovms_binary,
+        BackendType.transformers: settings.backend.transformers_binary,
     }
 
     for backend_type in settings.enabled_backends:
