@@ -43,5 +43,7 @@ class SupertonicEngine(TTSEngine):
         wav, _ = self._tts.synthesize(text, voice_style=style, lang="en")
 
         buffer = io.BytesIO()
+        buffer.name = f"output.{response_format.lower()}"
         sf.write(buffer, wav, samplerate=24000, format=response_format)
-        return buffer.getvalue()
+        buffer.seek(0)
+        return buffer.read()

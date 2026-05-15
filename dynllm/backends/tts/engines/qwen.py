@@ -55,5 +55,7 @@ class QwenTTSEngine(TTSEngine):
         )
 
         buffer = io.BytesIO()
+        buffer.name = f"output.{response_format.lower()}"
         sf.write(buffer, wavs[0], sr, format=response_format)
-        return buffer.getvalue()
+        buffer.seek(0)
+        return buffer.read()
