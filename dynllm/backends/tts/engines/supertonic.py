@@ -37,8 +37,6 @@ class SupertonicEngine(TTSEngine):
         if not self._loaded:
             raise RuntimeError("Supertonic TTS not loaded")
 
-        import soundfile as sf
-
         voice_name = voice or _DEFAULT_VOICE
         style = self._tts.get_voice_style(voice_name=voice_name)
         wav, _ = self._tts.synthesize(text, voice_style=style, lang="en")
@@ -48,7 +46,7 @@ class SupertonicEngine(TTSEngine):
         )
         try:
             tmp.close()
-            sf.write(tmp.name, wav, samplerate=24000)
+            self._tts.save_audio(wav, tmp.name)
             with open(tmp.name, "rb") as f:
                 return f.read()
         finally:
