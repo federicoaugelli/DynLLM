@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import io
 import logging
+import os
+import tempfile
 
 from dynllm.backends.tts.base import TTSEngine
 
@@ -42,8 +43,13 @@ class SupertonicEngine(TTSEngine):
         style = self._tts.get_voice_style(voice_name=voice_name)
         wav, _ = self._tts.synthesize(text, voice_style=style, lang="en")
 
-        buffer = io.BytesIO()
-        buffer.name = f"output.{response_format.lower()}"
-        sf.write(buffer, wav, samplerate=24000, format=response_format)
-        buffer.seek(0)
-        return buffer.read()
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=f".{response_format.lower()}", delete=False
+        )
+        try:
+            tmp.close()
+            sf.write(tmp.name, wav, samplerate=24000)
+            with open(tmp.name, "rb") as f:
+                return f.read()
+        finally:
+            os.unlink(tmp.name)

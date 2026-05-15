@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import io
 import logging
+import os
+import tempfile
 
 from dynllm.backends.tts.base import TTSEngine
 
@@ -54,8 +55,13 @@ class QwenTTSEngine(TTSEngine):
             language="English",
         )
 
-        buffer = io.BytesIO()
-        buffer.name = f"output.{response_format.lower()}"
-        sf.write(buffer, wavs[0], sr, format=response_format)
-        buffer.seek(0)
-        return buffer.read()
+        tmp = tempfile.NamedTemporaryFile(
+            suffix=f".{response_format.lower()}", delete=False
+        )
+        try:
+            tmp.close()
+            sf.write(tmp.name, wavs[0], sr)
+            with open(tmp.name, "rb") as f:
+                return f.read()
+        finally:
+            os.unlink(tmp.name)
