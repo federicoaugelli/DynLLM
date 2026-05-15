@@ -45,6 +45,7 @@ from dynllm.core.config import (
     Settings,
     get_settings,
 )
+from dynllm.backends.tts import TTSBackend
 from dynllm.core.vram_manager import VRAMManager, decrement_active, increment_active
 from dynllm.db.manager import StateManager
 
@@ -355,21 +356,53 @@ async def audio_speech(
     state: StateManager = Depends(_get_state),
 ) -> Response:
     model_cfg = _require_model(settings, body.model, expected_types={ModelType.speech})
-    if model_cfg.backend not in (BackendType.openvino, BackendType.transformers):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Model '{body.model}' does not use a backend that supports "
-                "audio speech endpoints."
-            ),
+
+    if model_cfg.backend == BackendType.tts:
+        port = await _ensure_loaded(model_cfg, vram)
+        await state.touch(model_cfg.name)
+        await increment_active(model_cfg.name)
+        try:
+            tts_backend = vram.get_backend(BackendType.tts)
+            if tts_backend is None or not isinstance(tts_backend, TTSBackend):
+                raise HTTPException(status_code=503, detail="TTS backend not available")
+            audio_bytes = await tts_backend.synthesize(
+                text=body.input,
+                voice=body.voice,
+                response_format=body.response_format or "wav",
+                speed=body.speed or 1.0,
+            )
+            media_type_map = {
+                "wav": "audio/wav",
+                "mp3": "audio/mpeg",
+                "opus": "audio/opus",
+                "flac": "audio/flac",
+            }
+            media_type = media_type_map.get(body.response_format or "wav", "audio/wav")
+            return Response(content=audio_bytes, media_type=media_type)
+        finally:
+            await decrement_active(model_cfg.name)
+
+    if model_cfg.backend == BackendType.openvino:
+        return await _proxy_model_request(
+            request,
+            model_cfg=model_cfg,
+            state=state,
+            vram=vram,
+            path="v3/audio/speech",
         )
-    api_version = "v3" if model_cfg.backend == BackendType.openvino else "v1"
-    return await _proxy_model_request(
-        request,
-        model_cfg=model_cfg,
-        state=state,
-        vram=vram,
-        path=f"{api_version}/audio/speech",
+
+    if model_cfg.backend == BackendType.transformers:
+        return await _proxy_model_request(
+            request,
+            model_cfg=model_cfg,
+            state=state,
+            vram=vram,
+            path="v1/audio/speech",
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Model '{body.model}' does not use a backend that supports audio speech endpoints.",
     )
 
 

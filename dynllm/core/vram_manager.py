@@ -24,6 +24,7 @@ from dynllm.backends.base import Backend
 from dynllm.backends.llamacpp import LlamaCppBackend
 from dynllm.backends.openvino import OpenVINOBackend
 from dynllm.backends.transformers import TransformersBackend
+from dynllm.backends.tts import TTSBackend
 from dynllm.core.config import BackendType, ModelConfig, Settings
 from dynllm.db.manager import StateManager
 from dynllm.db.models import ModelStatus
@@ -107,6 +108,8 @@ class VRAMManager:
             self._backends[BackendType.transformers] = TransformersBackend(
                 binary=settings.backend.transformers_binary
             )
+        if BackendType.tts in settings.enabled_backends:
+            self._backends[BackendType.tts] = TTSBackend()
 
         self._ports = PortAllocator(
             settings.backend.port_range_start,
@@ -171,6 +174,10 @@ class VRAMManager:
         if state is not None and state.status == ModelStatus.loaded:
             return state.port
         return None
+
+    def get_backend(self, backend_type: BackendType) -> Backend | None:
+        """Return the backend instance for *backend_type*, or None."""
+        return self._backends.get(backend_type)
 
     # ------------------------------------------------------------------
     # Internal helpers (must be called with self._lock held)

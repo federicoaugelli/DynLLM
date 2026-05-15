@@ -32,6 +32,7 @@ idle_timeout_seconds: 300
 enabled_backends:
   - llamacpp    # serves GGUF models via llama-server
   - openvino    # serves OpenVINO IR models via OVMS
+  # - tts      # in-process TTS engines (Qwen, Supertonic, …)
 
 # Backend binary configuration
 backend:
@@ -73,7 +74,7 @@ log_level: "info"   # debug | info | warning | error
 # Each model has:
 #   name         – unique ID used in API requests (model field)
 #   path         – file (.gguf) or directory (OpenVINO IR) on disk
-#   backend      – "llamacpp", "openvino", or "transformers"
+#   backend      – "llamacpp", "openvino", "transformers", or "tts"
 #   model_type   – "llm", "transcription", "speech",
 #                  "embedding", "rerank", "classification",
 #                  "detection", "segmentation", "ocr",
@@ -205,30 +206,31 @@ models:
     target_device: CPU
     vram_mb: 0
 
-  - name: "speecht5-ov"
-    path: "/mnt/models/openvino/speecht5-ov"
-    backend: openvino
+  # --- TTS engines (in-process, supports GPU) ---
+  # These use the 'tts' backend which loads the model in-process.
+  # Each 'tts_engine' maps to a specific Python package.
+  #
+  #   Qwen3-TTS:
+  #     uv pip install qwen-tts soundfile
+  #     The 'path' is the Hugging Face model ID or local directory.
+  - name: "qwen3-tts"
+    path: "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+    backend: tts
     model_type: speech
-    target_device: CPU
-    vram_mb: 0
+    tts_engine: qwen
+    target_device: xpu
+    vram_mb: 3000
 
-  # --- Hugging Face transformers TTS (supports many models on GPU) ---
-  # Requires: uv pip install "transformers[serving]"
-  # The 'path' can be a local directory or a Hugging Face model ID.
-  # Uses OpenAI /v1/audio/speech endpoint.
-  # NOTE: model_type "speech" for transformers backend includes TTS models.
-  #   device: auto  → let torch pick the best available device
-  #   device: xpu   → Intel Arc / XPU
-  #   device: cuda  → NVIDIA GPU
-  #   device: cpu   → CPU only
-  - name: "speecht5-hf"
-    path: "microsoft/speecht5_tts"
-    backend: transformers
+  #   Supertonic:
+  #     uv pip install supertonic soundfile
+  #     'path' is ignored; models are auto-downloaded.
+  - name: "supertonic"
+    path: ""
+    backend: tts
     model_type: speech
-    device: xpu
-    dtype: float32
+    tts_engine: supertonic
+    target_device: xpu
     vram_mb: 2000
-    # unload_time: 600
 
   # --- Embedding model (llama.cpp example) ---
   - name: "bge-m3-gguf"

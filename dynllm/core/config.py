@@ -21,6 +21,7 @@ class BackendType(str, Enum):
     llamacpp = "llamacpp"
     openvino = "openvino"
     transformers = "transformers"
+    tts = "tts"
 
 
 class ModelType(str, Enum):
@@ -112,6 +113,10 @@ class ModelConfig(BaseModel):
 
     revision: Optional[str] = None
     """Optional Hugging Face revision appended as model@revision for transformers serve."""
+
+    # --- TTS engine specific ---
+    tts_engine: str = ""
+    """TTS model engine name ('qwen', 'supertonic'). Required when backend=tts."""
 
     tool_parser: Optional[str] = None
     """
@@ -387,6 +392,24 @@ class ModelConfig(BaseModel):
                 raise ValueError(
                     "model_distribution_policy is only supported for openvino backend with model_type=llm"
                 )
+        if self.backend == BackendType.tts:
+            if self.model_type != ModelType.speech:
+                raise ValueError(
+                    "tts backend only supports model_type=speech"
+                )
+            if not self.tts_engine:
+                raise ValueError(
+                    "tts backend requires 'tts_engine' field to be set "
+                    "(e.g. 'qwen', 'supertonic')"
+                )
+        if self.backend != BackendType.tts and self.tts_engine:
+            raise ValueError(
+                "tts_engine is only valid for backend=tts"
+            )
+        if self.backend == BackendType.openvino and self.model_type == ModelType.speech:
+            raise ValueError(
+                "openvino no longer supports model_type=speech; use backend=tts instead"
+            )
         return self
 
 

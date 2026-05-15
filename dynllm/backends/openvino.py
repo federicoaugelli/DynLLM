@@ -30,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 0.5
 _AUDIO_READINESS_PATHS: Final[tuple[str, ...]] = (
-    "v3/audio/speech",
     "v3/audio/transcriptions",
 )
 _IMAGE_READINESS_PATHS: Final[tuple[str, ...]] = (
@@ -129,8 +128,6 @@ class OpenVINOBackend(Backend):
             return self._build_llm_command(model, port, model_path, temp_dir)
         if model.model_type == ModelType.transcription:
             return self._build_audio_command(model, port, model_path, "speech2text")
-        if model.model_type == ModelType.speech:
-            return self._build_audio_command(model, port, model_path, "text2speech")
         if model.model_type == ModelType.image_generation:
             return self._build_image_gen_command(model, port, model_path)
         raise RuntimeError(

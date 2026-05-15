@@ -6,6 +6,11 @@ from dynllm.backends.transformers import TransformersBackend
 from dynllm.core.config import BackendType, ModelConfig, ModelType
 
 
+import shutil
+
+_TRANSFORMERS_BIN = shutil.which("transformers") or "transformers"
+
+
 def test_transformers_command_uses_local_model_path_and_runtime_flags() -> None:
     backend = TransformersBackend(binary="transformers")
     model = ModelConfig(
@@ -21,7 +26,7 @@ def test_transformers_command_uses_local_model_path_and_runtime_flags() -> None:
     cmd = backend._build_command(model, 9101)
 
     assert cmd == [
-        "transformers",
+        _TRANSFORMERS_BIN,
         "serve",
         "/models/Qwen2.5-3B-Instruct",
         "--host",
@@ -57,7 +62,7 @@ def test_transformers_command_includes_quantization_and_optional_runtime_flags()
     cmd = backend._build_command(model, 9102)
 
     assert cmd == [
-        "transformers",
+        _TRANSFORMERS_BIN,
         "serve",
         "/models/Qwen2.5-3B-Instruct@main",
         "--host",
@@ -95,7 +100,7 @@ def test_transformers_command_for_speech_model() -> None:
     cmd = backend._build_command(model, 9103)
 
     assert cmd == [
-        "transformers",
+        _TRANSFORMERS_BIN,
         "serve",
         "microsoft/speecht5_tts",
         "--host",
