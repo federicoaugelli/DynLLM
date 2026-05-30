@@ -80,19 +80,34 @@ class PrivacyFilterBackend(Backend):
         return self._pid
 
     async def stop(self, pid: int) -> None:
-        if self._pipeline is not None:
-            logger.info("Unloading privacy filter model …")
-            del self._pipeline
-            self._pipeline = None
-            try:
-                import gc
+        if self._pipeline is None:
+            return
+        logger.info("Unloading privacy filter model …")
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self._executor, self._unload_sync)
 
-                import torch
+    def _unload_sync(self) -> None:
+        """Synchronous GPU cleanup – runs in thread pool."""
+        del self._pipeline
+        self._pipeline = None
 
-                gc.collect()
+        import gc
+
+        gc.collect()
+
+        try:
+            import torch
+
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                torch.xpu.empty_cache()
+                logger.debug("XPU cache emptied")
+            elif hasattr(torch, "cuda") and torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            except ImportError:
-                pass
+                logger.debug("CUDA cache emptied")
+        except Exception:
+            logger.debug("GPU cache cleanup skipped (best-effort)", exc_info=True)
+
+        logger.info("Privacy filter model unloaded")
 
     async def is_ready(
         self,

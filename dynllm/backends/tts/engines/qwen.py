@@ -35,6 +35,20 @@ class QwenTTSEngine(TTSEngine):
             return
         del self._model
         self._loaded = False
+
+        import gc
+
+        gc.collect()
+        try:
+            import torch
+
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                torch.xpu.empty_cache()
+            elif hasattr(torch, "cuda") and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
         logger.info("Qwen3-TTS model unloaded")
 
     async def synthesize(

@@ -23,7 +23,23 @@ class SupertonicEngine(TTSEngine):
         logger.info("Supertonic TTS loaded")
 
     async def unload(self) -> None:
+        if hasattr(self, "_tts"):
+            del self._tts
         self._loaded = False
+
+        import gc
+
+        gc.collect()
+        try:
+            import torch
+
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                torch.xpu.empty_cache()
+            elif hasattr(torch, "cuda") and torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
         logger.info("Supertonic TTS unloaded")
 
     async def synthesize(
