@@ -171,3 +171,28 @@ class ModelStateResponse(BaseModel):
 
 class UnloadRequest(BaseModel):
     model: str
+
+
+# ---------------------------------------------------------------------------
+# Privacy filter (/v1/guardrails/privacy-filter)
+# ---------------------------------------------------------------------------
+
+
+class PrivacyFilterSpan(BaseModel):
+    entity_group: str
+    score: float
+    word: str
+    start: int
+    end: int
+
+
+class PrivacyFilterRequest(BaseModel):
+    model: str
+    text: str
+    mask_strategy: str = "replace"
+    categories: Optional[list[str]] = None
+
+
+class PrivacyFilterResponse(BaseModel):
+    masked_text: str
+    spans: list[PrivacyFilterSpan]

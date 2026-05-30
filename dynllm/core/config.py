@@ -22,6 +22,7 @@ class BackendType(str, Enum):
     openvino = "openvino"
     transformers = "transformers"
     tts = "tts"
+    privacy_filter = "privacy_filter"
 
 
 class ModelType(str, Enum):
@@ -409,6 +410,14 @@ class ModelConfig(BaseModel):
         if self.backend == BackendType.openvino and self.model_type == ModelType.speech:
             raise ValueError(
                 "openvino no longer supports model_type=speech; use backend=tts instead"
+            )
+        if self.backend == BackendType.privacy_filter and self.model_type != ModelType.classification:
+            raise ValueError(
+                "privacy_filter backend only supports model_type=classification"
+            )
+        if self.backend != BackendType.privacy_filter and self.model_type == ModelType.classification:
+            raise ValueError(
+                "model_type=classification is only supported by the privacy_filter backend"
             )
         return self
 

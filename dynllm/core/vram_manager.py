@@ -23,6 +23,7 @@ from typing import Optional
 from dynllm.backends.base import Backend
 from dynllm.backends.llamacpp import LlamaCppBackend
 from dynllm.backends.openvino import OpenVINOBackend
+from dynllm.backends.privacy_filter import PrivacyFilterBackend
 from dynllm.backends.transformers import TransformersBackend
 from dynllm.backends.tts import TTSBackend
 from dynllm.core.config import BackendType, ModelConfig, Settings
@@ -110,6 +111,8 @@ class VRAMManager:
             )
         if BackendType.tts in settings.enabled_backends:
             self._backends[BackendType.tts] = TTSBackend()
+        if BackendType.privacy_filter in settings.enabled_backends:
+            self._backends[BackendType.privacy_filter] = PrivacyFilterBackend()
 
         self._ports = PortAllocator(
             settings.backend.port_range_start,

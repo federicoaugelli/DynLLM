@@ -34,6 +34,9 @@ from dynllm.api.schemas import (
     ModelObject,
     ModelStateResponse,
     ModelsResponse,
+    PrivacyFilterRequest,
+    PrivacyFilterResponse,
+    PrivacyFilterSpan,
     RerankRequest,
     SpeechRequest,
     UnloadRequest,
@@ -45,6 +48,7 @@ from dynllm.core.config import (
     Settings,
     get_settings,
 )
+from dynllm.backends.privacy_filter import PrivacyFilterBackend
 from dynllm.backends.tts import TTSBackend
 from dynllm.core.vram_manager import VRAMManager, decrement_active, increment_active
 from dynllm.db.manager import StateManager
@@ -597,6 +601,59 @@ async def kserve_model_infer(
     """Run inference via KServe API (passthrough to OVMS)."""
     return await _kserve_proxy(
         request, name, f"v2/models/{name}/infer", settings, vram, state
+    )
+
+
+# ---------------------------------------------------------------------------
+# /v1/guardrails/privacy-filter
+# ---------------------------------------------------------------------------
+
+
+@router.post("/v1/guardrails/privacy-filter", response_model=PrivacyFilterResponse)
+async def privacy_filter(
+    body: PrivacyFilterRequest,
+    settings: Settings = Depends(get_settings),
+    vram: VRAMManager = Depends(_get_vram),
+    state: StateManager = Depends(_get_state),
+) -> PrivacyFilterResponse:
+    """
+    Detect and mask PII in text using the OpenAI Privacy Filter model.
+
+    Request body:
+      ``text`` (required)        – the input string to scan.
+      ``mask_strategy`` (opt)    – ``"replace"`` (default, category tag),
+                                   ``"redact"`` (``[REDACTED]``), or
+                                   ``"hash"`` (``[REDACTED_<hash>]``).
+      ``categories`` (opt)       – list of entity groups to mask;
+                                   ``null`` means all categories.
+
+    Returns the masked text plus a list of detected PII spans with
+    positions in the original input.
+    """
+    model_cfg = _require_model(
+        settings,
+        body.model,
+        expected_types={ModelType.classification},
+    )
+    await _ensure_loaded(model_cfg, vram)
+    await state.touch(model_cfg.name)
+    backend = vram.get_backend(BackendType.privacy_filter)
+    if backend is None or not isinstance(backend, PrivacyFilterBackend):
+        raise HTTPException(status_code=503, detail="Privacy filter backend not available")
+
+    await increment_active(model_cfg.name)
+    try:
+        result = await backend.filter_text(
+            body.text,
+            mask_strategy=body.mask_strategy,
+            categories=body.categories,
+        )
+    finally:
+        await decrement_active(model_cfg.name)
+
+    return PrivacyFilterResponse(
+        masked_text=result["masked_text"],
+        spans=[PrivacyFilterSpan(**s) for s in result["spans"]],
     )
 
 

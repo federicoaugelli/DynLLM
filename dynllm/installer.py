@@ -47,6 +47,12 @@ _INSTALL_HINTS: dict[BackendType, str] = {
         "    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu\n"
         "  Then set 'backend.transformers_binary' if the CLI is outside PATH."
     ),
+    BackendType.privacy_filter: (
+        "privacy_filter backend requires the 'transformers' and 'torch' packages.\n"
+        "  Install them into your DynLLM environment:\n"
+        "    uv pip install transformers torch\n"
+        "  The model will be auto-downloaded from HuggingFace on first load."
+    ),
 }
 
 
@@ -97,6 +103,21 @@ def check_backends(settings: Settings) -> None:
     }
 
     for backend_type in settings.enabled_backends:
+        if backend_type == BackendType.privacy_filter:
+            try:
+                import transformers  # noqa: F401
+                import torch  # noqa: F401
+
+                logger.info("Backend 'privacy_filter' packages found: transformers, torch")
+            except ImportError as exc:
+                hint = _INSTALL_HINTS.get(backend_type, "")
+                logger.warning(
+                    "Backend 'privacy_filter' missing package: %s\n%s",
+                    exc.name,
+                    hint,
+                )
+            continue
+
         binary = binary_map.get(backend_type)
         if binary is None:
             continue
