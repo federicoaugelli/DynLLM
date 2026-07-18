@@ -13,6 +13,7 @@ Management endpoints (non-standard):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -126,7 +127,9 @@ def _backend_request_model(model_cfg: ModelConfig) -> str:
     return model_cfg.name
 
 
-def _rewrite_backend_model(raw_body: bytes, model_cfg: ModelConfig, content_type: str) -> bytes:
+def _rewrite_backend_model(
+    raw_body: bytes, model_cfg: ModelConfig, content_type: str
+) -> bytes:
     backend_model = _backend_request_model(model_cfg)
     if backend_model == model_cfg.name:
         return raw_body
@@ -156,10 +159,11 @@ async def _proxy_model_request(
     vram: VRAMManager,
     path: str,
     stream: bool = False,
+    body: bytes | None = None,
 ) -> Response:
     port = await _ensure_loaded(model_cfg, vram)
     await state.touch(model_cfg.name)
-    raw_body = await request.body()
+    raw_body = body if body is not None else await request.body()
     content_type = request.headers.get("content-type", "").lower()
     proxied_body = _rewrite_backend_model(raw_body, model_cfg, content_type)
 
@@ -261,8 +265,7 @@ async def completions(
 # ---------------------------------------------------------------------------
 
 
-async def _audio_form_model_name(request: Request) -> str:
-    raw_body = await request.body()
+def _audio_model_name_from_body(raw_body: bytes) -> str:
     match = _MULTIPART_MODEL_RE.search(raw_body)
     if match is None:
         raise HTTPException(
@@ -283,6 +286,11 @@ async def _audio_form_model_name(request: Request) -> str:
     return model_name
 
 
+async def _audio_form_model_name(request: Request) -> str:
+    raw_body = await request.body()
+    return _audio_model_name_from_body(raw_body)
+
+
 async def _audio_form_request(
     request: Request,
     *,
@@ -291,7 +299,8 @@ async def _audio_form_request(
     state: StateManager,
     path: str,
 ) -> Response:
-    model_name = await _audio_form_model_name(request)
+    raw_body = await request.body()
+    model_name = _audio_model_name_from_body(raw_body)
     model_cfg = _require_model(
         settings,
         model_name,
@@ -305,13 +314,34 @@ async def _audio_form_request(
                 "audio transcription endpoints."
             ),
         )
-    return await _proxy_model_request(
-        request,
-        model_cfg=model_cfg,
-        state=state,
-        vram=vram,
-        path=path,
-    )
+
+    # If the model was not already loaded, this is a cold-start request and we
+    # retry transient-looking failures to avoid the client seeing a 400/503
+    # while the backend is still finalising model initialisation.
+    already_loaded = await vram.get_port(model_cfg.name) is not None
+    max_retries = 1 if already_loaded else 3
+
+    for attempt in range(max_retries):
+        response = await _proxy_model_request(
+            request,
+            body=raw_body,
+            model_cfg=model_cfg,
+            state=state,
+            vram=vram,
+            path=path,
+        )
+        if response.status_code in (400, 502, 503) and attempt < max_retries - 1:
+            logger.debug(
+                "Audio request for '%s' returned %d on cold-start attempt %d; retrying...",
+                model_cfg.name,
+                response.status_code,
+                attempt + 1,
+            )
+            await asyncio.sleep(2.0)
+            continue
+        return response
+
+    return response  # pragma: no cover
 
 
 @router.post("/v1/audio/transcriptions")
@@ -362,7 +392,7 @@ async def audio_speech(
     model_cfg = _require_model(settings, body.model, expected_types={ModelType.speech})
 
     if model_cfg.backend == BackendType.tts:
-        port = await _ensure_loaded(model_cfg, vram)
+        await _ensure_loaded(model_cfg, vram)
         await state.touch(model_cfg.name)
         await increment_active(model_cfg.name)
         try:
@@ -575,7 +605,9 @@ async def kserve_model_metadata(
     state: StateManager = Depends(_get_state),
 ) -> Response:
     """Get KServe model metadata."""
-    return await _kserve_proxy(request, name, f"v2/models/{name}", settings, vram, state)
+    return await _kserve_proxy(
+        request, name, f"v2/models/{name}", settings, vram, state
+    )
 
 
 @router.get("/v2/models/{name}/ready")
@@ -587,7 +619,9 @@ async def kserve_model_ready(
     state: StateManager = Depends(_get_state),
 ) -> Response:
     """Check KServe model readiness."""
-    return await _kserve_proxy(request, name, f"v2/models/{name}/ready", settings, vram, state)
+    return await _kserve_proxy(
+        request, name, f"v2/models/{name}/ready", settings, vram, state
+    )
 
 
 @router.post("/v2/models/{name}/infer")
@@ -639,7 +673,9 @@ async def privacy_filter(
     await state.touch(model_cfg.name)
     backend = vram.get_backend(BackendType.privacy_filter)
     if backend is None or not isinstance(backend, PrivacyFilterBackend):
-        raise HTTPException(status_code=503, detail="Privacy filter backend not available")
+        raise HTTPException(
+            status_code=503, detail="Privacy filter backend not available"
+        )
 
     await increment_active(model_cfg.name)
     try:

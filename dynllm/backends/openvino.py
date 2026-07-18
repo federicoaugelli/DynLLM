@@ -29,12 +29,43 @@ from dynllm.core.config import BackendType, ModelConfig, ModelType
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 0.5
-_AUDIO_READINESS_PATHS: Final[tuple[str, ...]] = (
-    "v3/audio/transcriptions",
-)
-_IMAGE_READINESS_PATHS: Final[tuple[str, ...]] = (
-    "v3/images/generations",
-)
+_AUDIO_READINESS_PATHS: Final[tuple[str, ...]] = ("v3/audio/transcriptions",)
+_IMAGE_READINESS_PATHS: Final[tuple[str, ...]] = ("v3/images/generations",)
+
+
+def _minimal_wav() -> bytes:
+    """Return a tiny, valid WAV file (46 bytes, 16 kHz mono PCM, one sample).
+
+    This is used as a lightweight probe for audio transcription models. It is
+    small enough to be harmless but valid enough for backends to accept or
+    reject it quickly without a full inference warm-up.
+    """
+    import struct
+
+    data = b"\x00\x00"
+    data_size = len(data)
+    fmt_chunk = struct.pack(
+        "<HHIIHH",
+        1,  # format tag (PCM)
+        1,  # channels
+        16000,  # sample rate
+        32000,  # byte rate
+        2,  # block align
+        16,  # bits per sample
+    )
+    return b"".join(
+        [
+            b"RIFF",
+            struct.pack("<I", 36 + data_size),
+            b"WAVE",
+            b"fmt ",
+            struct.pack("<I", 16),
+            fmt_chunk,
+            b"data",
+            struct.pack("<I", data_size),
+            data,
+        ]
+    )
 
 
 class OpenVINOBackend(Backend):
@@ -207,7 +238,12 @@ class OpenVINOBackend(Backend):
         if model.reasoning_parser:
             cmd.extend(["--reasoning_parser", model.reasoning_parser])
         if model.enable_tool_guided_generation is not None:
-            cmd.extend(["--enable_tool_guided_generation", str(model.enable_tool_guided_generation).lower()])
+            cmd.extend(
+                [
+                    "--enable_tool_guided_generation",
+                    str(model.enable_tool_guided_generation).lower(),
+                ]
+            )
 
         # Speculative decoding
         if model.draft_model:
@@ -219,7 +255,9 @@ class OpenVINOBackend(Backend):
         if model.cache_size is not None:
             cmd.extend(["--cache_size", str(model.cache_size)])
         if model.enable_prefix_caching is not None:
-            cmd.extend(["--enable_prefix_caching", str(model.enable_prefix_caching).lower()])
+            cmd.extend(
+                ["--enable_prefix_caching", str(model.enable_prefix_caching).lower()]
+            )
 
         # Scheduling / Batching
         if model.max_num_seqs is not None:
@@ -249,7 +287,11 @@ class OpenVINOBackend(Backend):
                 logger.warning("Failed to clean up temp dir for PID %d: %s", pid, exc)
 
     async def is_ready(
-        self, port: int, model_name: str = "", timeout: float = 120.0, model_type: str = "llm"
+        self,
+        port: int,
+        model_name: str = "",
+        timeout: float = 120.0,
+        model_type: str = "llm",
     ) -> bool:
         """
         Poll ``GET /v2/models/<model_name>/ready`` until OVMS confirms the
@@ -292,9 +334,24 @@ class OpenVINOBackend(Backend):
                         )
                         return True
                     if resp.status_code == 404 and model_name and model_type != "llm":
-                        if model_type == "image_generation" and await self._image_endpoints_present(client, port):
+                        if (
+                            model_type == "image_generation"
+                            and await self._image_endpoints_present(client, port)
+                        ):
                             logger.info(
                                 "OVMS on port %d: image generation model '%s' is ready",
+                                port,
+                                model_name,
+                            )
+                            return True
+                        if (
+                            model_type == "transcription"
+                            and await self._transcription_ready(
+                                client, port, model_name
+                            )
+                        ):
+                            logger.info(
+                                "OVMS on port %d: transcription model '%s' is ready",
                                 port,
                                 model_name,
                             )
@@ -321,6 +378,37 @@ class OpenVINOBackend(Backend):
             port,
             model_name,
             timeout,
+        )
+        return False
+
+    async def _transcription_ready(
+        self, client: httpx.AsyncClient, port: int, model_name: str
+    ) -> bool:
+        """Probe the transcription endpoint with a tiny dummy WAV file.
+
+        OVMS audio models do not expose a KServe readiness endpoint, so we use a
+        real (but minimal) request to detect when the model is actually loaded.
+        A 200/202/400/422 response means the endpoint is accepting traffic;
+        503/404 means the model is still loading.
+        """
+        wav = _minimal_wav()
+        try:
+            resp = await client.post(
+                f"http://127.0.0.1:{port}/v3/audio/transcriptions",
+                files={"file": ("probe.wav", wav, "audio/wav")},
+                data={"model": model_name},
+                timeout=httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=5.0),
+            )
+        except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
+            return False
+        if resp.status_code in (503, 404):
+            return False
+        if resp.status_code in (200, 202, 400, 422):
+            return True
+        logger.debug(
+            "Transcription readiness probe on port %d returned unexpected status %d",
+            port,
+            resp.status_code,
         )
         return False
 

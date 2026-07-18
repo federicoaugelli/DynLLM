@@ -3,8 +3,23 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from dynllm.backends.openvino import OpenVINOBackend
+import pytest
+
+from dynllm.backends.openvino import OpenVINOBackend, _minimal_wav
 from dynllm.core.config import BackendType, ModelConfig, ModelType
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+
+
+class _FakeClient:
+    def __init__(self, statuses: list[int]) -> None:
+        self._statuses = iter(statuses)
+
+    async def post(self, *args, **kwargs):
+        return _FakeResponse(next(self._statuses))
 
 
 def test_llm_command_uses_task_approach(tmp_path: Path) -> None:
@@ -238,13 +253,37 @@ def test_non_llm_model_rejects_optimization_flags(tmp_path: Path) -> None:
             kv_cache_precision="u8",
         )
 
-    with pytest.raises(ValueError, match="draft_model"):
-        ModelConfig(
-            name="bad-model",
-            path=Path("/models/test"),
-            backend=BackendType.openvino,
-            vram_mb=1024,
-            target_device="CPU",
-            model_type=ModelType.embedding,
-            draft_model=Path("some/relative/path"),
-        )
+        with pytest.raises(ValueError, match="draft_model"):
+            ModelConfig(
+                name="bad-model",
+                path=Path("/models/test"),
+                backend=BackendType.openvino,
+                vram_mb=1024,
+                target_device="CPU",
+                model_type=ModelType.embedding,
+                draft_model=Path("some/relative/path"),
+            )
+
+
+def test_minimal_wav_is_valid_header() -> None:
+    wav = _minimal_wav()
+    assert wav.startswith(b"RIFF")
+    assert wav[8:12] == b"WAVE"
+    assert b"fmt " in wav
+    assert b"data" in wav
+    assert len(wav) == 46
+
+
+@pytest.mark.anyio
+async def test_transcription_ready_interprets_status_codes() -> None:
+    backend = OpenVINOBackend(binary="ovms")
+
+    # Model still loading / not registered yet
+    assert not await backend._transcription_ready(_FakeClient([503]), 9100, "whisper")
+    assert not await backend._transcription_ready(_FakeClient([404]), 9100, "whisper")
+
+    # Model is accepting traffic (even if the dummy probe itself is rejected as bad request)
+    assert await backend._transcription_ready(_FakeClient([400]), 9100, "whisper")
+    assert await backend._transcription_ready(_FakeClient([422]), 9100, "whisper")
+    assert await backend._transcription_ready(_FakeClient([200]), 9100, "whisper")
+    assert await backend._transcription_ready(_FakeClient([202]), 9100, "whisper")

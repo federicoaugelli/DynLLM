@@ -3,12 +3,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional
 
 from dynllm.backends.base import Backend
 from dynllm.backends.tts.base import TTSEngine
 from dynllm.backends.tts.engines import ENGINE_REGISTRY
-from dynllm.core.config import BackendType, ModelConfig, ModelType
+from dynllm.core.config import BackendType, ModelConfig
 
 logger = logging.getLogger(__name__)
 

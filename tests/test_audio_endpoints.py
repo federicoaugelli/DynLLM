@@ -24,10 +24,16 @@ class DummyTTSEngine(TTSEngine):
 class DummyVRAM:
     def __init__(self) -> None:
         self.loaded_models: list[str] = []
+        self._ports: dict[str, int] = {}
 
     async def ensure_loaded(self, model):
         self.loaded_models.append(model.name)
-        return 9123
+        if model.name not in self._ports:
+            self._ports[model.name] = 9123
+        return self._ports[model.name]
+
+    async def get_port(self, model_name: str) -> int | None:
+        return self._ports.get(model_name)
 
     def get_backend(self, backend_type):
         from dynllm.backends.tts import TTSBackend
@@ -158,3 +164,63 @@ def test_transcription_rejects_llm_model(client):
 
     assert response.status_code == 400
     assert "configured as 'llm'" in response.json()["detail"]
+
+
+def test_audio_transcriptions_retries_on_cold_start(client, monkeypatch):
+    """A 400 on the first cold-start attempt should be retried."""
+
+    async def _noop_sleep(_s: float) -> None:
+        return None
+
+    monkeypatch.setattr(routes.asyncio, "sleep", _noop_sleep)
+
+    responses = iter(
+        [
+            routes.Response(
+                content=b"bad", media_type="application/json", status_code=400
+            ),
+            routes.Response(content=b"ok", media_type="application/json"),
+        ]
+    )
+
+    async def fake_forward_request(request, port, path, body):
+        client.app.state._forwarded.append((port, path, body))
+        return next(responses)
+
+    monkeypatch.setattr(routes, "forward_request", fake_forward_request)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("speech.wav", b"wav-data", "audio/wav")},
+        data={"model": "whisper-ov"},
+    )
+
+    assert response.status_code == 200
+    assert len(client.app.state._forwarded) == 2
+
+
+def test_audio_transcriptions_no_retry_when_already_loaded(client, monkeypatch):
+    """A 400 for an already-loaded model should be returned immediately."""
+
+    async def _noop_sleep(_s: float) -> None:
+        return None
+
+    monkeypatch.setattr(routes.asyncio, "sleep", _noop_sleep)
+    client.app.state._dummy_vram._ports["whisper-ov"] = 9123
+
+    async def fake_forward_request(request, port, path, body):
+        client.app.state._forwarded.append((port, path, body))
+        return routes.Response(
+            content=b"bad", status_code=400, media_type="application/json"
+        )
+
+    monkeypatch.setattr(routes, "forward_request", fake_forward_request)
+
+    response = client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("speech.wav", b"wav-data", "audio/wav")},
+        data={"model": "whisper-ov"},
+    )
+
+    assert response.status_code == 400
+    assert len(client.app.state._forwarded) == 1
