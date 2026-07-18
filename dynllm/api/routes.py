@@ -316,10 +316,10 @@ async def _audio_form_request(
         )
 
     # If the model was not already loaded, this is a cold-start request and we
-    # retry transient-looking failures to avoid the client seeing a 400/503
+    # retry transient-looking failures to avoid the client seeing a 400/404/503
     # while the backend is still finalising model initialisation.
     already_loaded = await vram.get_port(model_cfg.name) is not None
-    max_retries = 1 if already_loaded else 3
+    max_retries = 1 if already_loaded else 10
 
     for attempt in range(max_retries):
         response = await _proxy_model_request(
@@ -330,14 +330,17 @@ async def _audio_form_request(
             vram=vram,
             path=path,
         )
-        if response.status_code in (400, 502, 503) and attempt < max_retries - 1:
+        if response.status_code in (400, 404, 502, 503) and attempt < max_retries - 1:
+            delay = min(2.0**attempt, 15.0)
             logger.debug(
-                "Audio request for '%s' returned %d on cold-start attempt %d; retrying...",
+                "Audio request for '%s' returned %d on cold-start attempt %d; "
+                "retrying in %.1fs...",
                 model_cfg.name,
                 response.status_code,
                 attempt + 1,
+                delay,
             )
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(delay)
             continue
         return response
 

@@ -33,25 +33,31 @@ _AUDIO_READINESS_PATHS: Final[tuple[str, ...]] = ("v3/audio/transcriptions",)
 _IMAGE_READINESS_PATHS: Final[tuple[str, ...]] = ("v3/images/generations",)
 
 
-def _minimal_wav() -> bytes:
-    """Return a tiny, valid WAV file (46 bytes, 16 kHz mono PCM, one sample).
+def _probe_wav(duration_seconds: float = 1.0) -> bytes:
+    """Return a valid PCM WAV file of silence for readiness probing.
 
-    This is used as a lightweight probe for audio transcription models. It is
-    small enough to be harmless but valid enough for backends to accept or
-    reject it quickly without a full inference warm-up.
+    The default 1-second clip is long enough to be accepted by ASR backends
+    (including Whisper-based ones) while still being very small.
     """
     import struct
 
-    data = b"\x00\x00"
+    sample_rate = 16000
+    channels = 1
+    bits_per_sample = 16
+    bytes_per_sample = bits_per_sample // 8
+    num_samples = int(sample_rate * duration_seconds)
+    data = b"\x00" * (num_samples * bytes_per_sample)
     data_size = len(data)
+    byte_rate = sample_rate * channels * bytes_per_sample
+    block_align = channels * bytes_per_sample
     fmt_chunk = struct.pack(
         "<HHIIHH",
         1,  # format tag (PCM)
-        1,  # channels
-        16000,  # sample rate
-        32000,  # byte rate
-        2,  # block align
-        16,  # bits per sample
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
     )
     return b"".join(
         [
@@ -66,6 +72,14 @@ def _minimal_wav() -> bytes:
             data,
         ]
     )
+
+
+def _minimal_wav() -> bytes:
+    """Return a tiny, valid WAV file (46 bytes, 16 kHz mono PCM, one sample).
+
+    Kept for backward compatibility; prefer :func:`_probe_wav` for ASR probes.
+    """
+    return _probe_wav(duration_seconds=1.0 / 16000)
 
 
 class OpenVINOBackend(Backend):
@@ -384,20 +398,21 @@ class OpenVINOBackend(Backend):
     async def _transcription_ready(
         self, client: httpx.AsyncClient, port: int, model_name: str
     ) -> bool:
-        """Probe the transcription endpoint with a tiny dummy WAV file.
+        """Probe the transcription endpoint with a short silent WAV file.
 
         OVMS audio models do not expose a KServe readiness endpoint, so we use a
-        real (but minimal) request to detect when the model is actually loaded.
-        A 200/202/400/422 response means the endpoint is accepting traffic;
-        503/404 means the model is still loading.
+        real request to detect when the model is actually loaded. A 200/202/400/422
+        response means the endpoint is accepting traffic; 503/404 means the model
+        is still loading. We use a 1-second WAV clip because very short probes can
+        be rejected by some ASR pipelines before the model is fully initialised.
         """
-        wav = _minimal_wav()
+        wav = _probe_wav(duration_seconds=1.0)
         try:
             resp = await client.post(
                 f"http://127.0.0.1:{port}/v3/audio/transcriptions",
                 files={"file": ("probe.wav", wav, "audio/wav")},
                 data={"model": model_name},
-                timeout=httpx.Timeout(connect=3.0, read=5.0, write=5.0, pool=5.0),
+                timeout=httpx.Timeout(connect=3.0, read=15.0, write=5.0, pool=5.0),
             )
         except (httpx.ConnectError, httpx.ReadError, httpx.TimeoutException):
             return False

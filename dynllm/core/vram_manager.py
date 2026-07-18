@@ -26,7 +26,7 @@ from dynllm.backends.openvino import OpenVINOBackend
 from dynllm.backends.privacy_filter import PrivacyFilterBackend
 from dynllm.backends.transformers import TransformersBackend
 from dynllm.backends.tts import TTSBackend
-from dynllm.core.config import BackendType, ModelConfig, Settings
+from dynllm.core.config import BackendType, ModelConfig, ModelType, Settings
 from dynllm.db.manager import StateManager
 from dynllm.db.models import ModelStatus
 
@@ -236,7 +236,9 @@ class VRAMManager:
         port = await self._ports.allocate()
         load_order = await self._state.next_load_order()
 
-        await self._state.set_loading(model.name, model.backend.value, self._total_vram_mb(model))
+        await self._state.set_loading(
+            model.name, model.backend.value, self._total_vram_mb(model)
+        )
 
         try:
             pid = await backend.start(model, port)
@@ -246,7 +248,10 @@ class VRAMManager:
                 f"Failed to start backend for '{model.name}': {exc}"
             ) from exc
 
-        ready = await backend.is_ready(port, model.name, model_type=model.model_type.value)
+        ready_timeout = 300.0 if model.model_type == ModelType.transcription else 60.0
+        ready = await backend.is_ready(
+            port, model.name, timeout=ready_timeout, model_type=model.model_type.value
+        )
         if not ready:
             # Kill the stalled process
             try:
@@ -265,7 +270,9 @@ class VRAMManager:
             port,
             pid,
             self._total_vram_mb(model),
-            f" + {model.draft_model_vram_mb} MB draft" if model.draft_model_vram_mb else "",
+            f" + {model.draft_model_vram_mb} MB draft"
+            if model.draft_model_vram_mb
+            else "",
         )
         return port
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from dynllm.backends.openvino import OpenVINOBackend, _minimal_wav
+from dynllm.backends.openvino import OpenVINOBackend, _minimal_wav, _probe_wav
 from dynllm.core.config import BackendType, ModelConfig, ModelType
 
 
@@ -271,7 +271,16 @@ def test_minimal_wav_is_valid_header() -> None:
     assert wav[8:12] == b"WAVE"
     assert b"fmt " in wav
     assert b"data" in wav
-    assert len(wav) == 46
+
+
+def test_probe_wav_is_one_second_silent_wav() -> None:
+    wav = _probe_wav(duration_seconds=1.0)
+    assert wav.startswith(b"RIFF")
+    assert wav[8:12] == b"WAVE"
+    assert b"fmt " in wav
+    assert b"data" in wav
+    # 1 second * 16000 Hz * 1 channel * 2 bytes + 44 byte header
+    assert len(wav) == 16000 * 2 + 44
 
 
 @pytest.mark.anyio
@@ -283,7 +292,7 @@ async def test_transcription_ready_interprets_status_codes() -> None:
     assert not await backend._transcription_ready(_FakeClient([404]), 9100, "whisper")
 
     # Model is accepting traffic (even if the dummy probe itself is rejected as bad request)
-    assert await backend._transcription_ready(_FakeClient([400]), 9100, "whisper")
-    assert await backend._transcription_ready(_FakeClient([422]), 9100, "whisper")
     assert await backend._transcription_ready(_FakeClient([200]), 9100, "whisper")
     assert await backend._transcription_ready(_FakeClient([202]), 9100, "whisper")
+    assert await backend._transcription_ready(_FakeClient([400]), 9100, "whisper")
+    assert await backend._transcription_ready(_FakeClient([422]), 9100, "whisper")
