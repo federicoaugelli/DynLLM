@@ -174,25 +174,25 @@ class UnloadRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Privacy filter (/v1/guardrails/privacy-filter)
+# litellm Generic Guardrail API (/beta/litellm_basic_guardrail_api)
 # ---------------------------------------------------------------------------
 
 
-class PrivacyFilterSpan(BaseModel):
-    entity_group: str
-    score: float
-    word: str
-    start: int
-    end: int
+class GuardrailRequest(BaseModel):
+    texts: list[str]
+    images: Optional[list[str]] = None
+    tools: Optional[list[dict[str, Any]]] = None
+    tool_calls: Optional[list[dict[str, Any]]] = None
+    structured_messages: Optional[list[dict[str, Any]]] = None
+    request_data: dict[str, Any] = {}
+    input_type: str = "request"
+    litellm_call_id: Optional[str] = None
+    litellm_trace_id: Optional[str] = None
+    additional_provider_specific_params: dict[str, Any] = {}
 
 
-class PrivacyFilterRequest(BaseModel):
-    model: str
-    text: str
-    mask_strategy: str = "replace"
-    categories: Optional[list[str]] = None
-
-
-class PrivacyFilterResponse(BaseModel):
-    masked_text: str
-    spans: list[PrivacyFilterSpan]
+class GuardrailResponse(BaseModel):
+    action: Literal["BLOCKED", "NONE", "GUARDRAIL_INTERVENED"]
+    blocked_reason: Optional[str] = None
+    texts: Optional[list[str]] = None
+    images: Optional[list[str]] = None

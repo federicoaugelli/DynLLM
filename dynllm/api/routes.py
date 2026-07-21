@@ -2,9 +2,10 @@
 FastAPI router with OpenAI-compatible endpoints.
 
 Endpoints:
-  GET  /v1/models                    – list configured models
-  POST /v1/chat/completions          – chat completions (streaming + non-streaming)
-  POST /v1/completions               – text completions (streaming + non-streaming)
+  GET  /v1/models                          – list configured models
+  POST /v1/chat/completions                – chat completions (streaming + non-streaming)
+  POST /v1/completions                     – text completions (streaming + non-streaming)
+  POST /beta/litellm_basic_guardrail_api   – litellm Generic Guardrail API (PII masking)
 
 Management endpoints (non-standard):
   GET  /admin/models                 – detailed model state
@@ -31,13 +32,12 @@ from dynllm.api.schemas import (
     ChatCompletionRequest,
     CompletionRequest,
     EmbeddingRequest,
+    GuardrailRequest,
+    GuardrailResponse,
     ImageGenerationRequest,
     ModelObject,
     ModelStateResponse,
     ModelsResponse,
-    PrivacyFilterRequest,
-    PrivacyFilterResponse,
-    PrivacyFilterSpan,
     RerankRequest,
     SpeechRequest,
     UnloadRequest,
@@ -642,57 +642,87 @@ async def kserve_model_infer(
 
 
 # ---------------------------------------------------------------------------
-# /v1/guardrails/privacy-filter
+# /beta/litellm_basic_guardrail_api  –  litellm Generic Guardrail API
 # ---------------------------------------------------------------------------
 
 
-@router.post("/v1/guardrails/privacy-filter", response_model=PrivacyFilterResponse)
-async def privacy_filter(
-    body: PrivacyFilterRequest,
+@router.post("/beta/litellm_basic_guardrail_api")
+async def litellm_guardrail(
+    body: GuardrailRequest,
     settings: Settings = Depends(get_settings),
     vram: VRAMManager = Depends(_get_vram),
     state: StateManager = Depends(_get_state),
-) -> PrivacyFilterResponse:
+) -> GuardrailResponse:
     """
-    Detect and mask PII in text using the OpenAI Privacy Filter model.
+    litellm Generic Guardrail API contract.
 
-    Request body:
-      ``text`` (required)        – the input string to scan.
-      ``mask_strategy`` (opt)    – ``"replace"`` (default, category tag),
-                                   ``"redact"`` (``[REDACTED]``), or
-                                   ``"hash"`` (``[REDACTED_<hash>]``).
-      ``categories`` (opt)       – list of entity groups to mask;
-                                   ``null`` means all categories.
+    Accepts PII masking requests from litellm's ``generic_guardrail_api``
+    guardrail type and returns masked text via the privacy filter backend.
 
-    Returns the masked text plus a list of detected PII spans with
-    positions in the original input.
+    Configure in ``litellm config.yaml``:
+
+    .. code-block:: yaml
+
+       guardrails:
+         - guardrail_name: "dynllm-pii-filter"
+           litellm_params:
+             guardrail: generic_guardrail_api
+             mode: pre_call
+             api_base: "http://localhost:8000"
+             additional_provider_specific_params:
+               model: "privacy-filter"       # DynLLM model name
+               mask_strategy: "replace"       # replace | redact | hash
+               # categories: ["private_email"]  # optional subset of entities
     """
-    model_cfg = _require_model(
-        settings,
-        body.model,
-        expected_types={ModelType.classification},
-    )
+    if body.input_type != "request" or not body.texts:
+        return GuardrailResponse(action="NONE")
+
+    params = body.additional_provider_specific_params or {}
+    model_name = params.get("model")
+    mask_strategy = params.get("mask_strategy", "replace")
+    categories = params.get("categories")
+
+    if model_name:
+        model_cfg = settings.model_by_name(model_name)
+    else:
+        model_cfg = next(
+            (m for m in settings.models if m.model_type == ModelType.classification),
+            None,
+        )
+
+    if model_cfg is None or model_cfg.backend != BackendType.privacy_filter:
+        return GuardrailResponse(action="NONE")
+
     await _ensure_loaded(model_cfg, vram)
     await state.touch(model_cfg.name)
+
     backend = vram.get_backend(BackendType.privacy_filter)
     if backend is None or not isinstance(backend, PrivacyFilterBackend):
-        raise HTTPException(
-            status_code=503, detail="Privacy filter backend not available"
-        )
+        return GuardrailResponse(action="NONE")
 
-    await increment_active(model_cfg.name)
-    try:
-        result = await backend.filter_text(
-            body.text,
-            mask_strategy=body.mask_strategy,
-            categories=body.categories,
-        )
-    finally:
-        await decrement_active(model_cfg.name)
+    masked_texts: list[str] = []
+    any_changed = False
+    for text in body.texts:
+        await increment_active(model_cfg.name)
+        try:
+            result = await backend.filter_text(
+                text,
+                mask_strategy=mask_strategy,
+                categories=categories,
+            )
+        finally:
+            await decrement_active(model_cfg.name)
 
-    return PrivacyFilterResponse(
-        masked_text=result["masked_text"],
-        spans=[PrivacyFilterSpan(**s) for s in result["spans"]],
+        masked_texts.append(result["masked_text"])
+        if result["masked_text"] != text:
+            any_changed = True
+
+    if not any_changed:
+        return GuardrailResponse(action="NONE")
+
+    return GuardrailResponse(
+        action="GUARDRAIL_INTERVENED",
+        texts=masked_texts,
     )
 
 

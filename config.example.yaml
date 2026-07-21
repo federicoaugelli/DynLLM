@@ -30,9 +30,10 @@ idle_timeout_seconds: 300
 # ------------------------------------
 # Uncomment only the backends you have installed.
 enabled_backends:
-  - llamacpp    # serves GGUF models via llama-server
-  - openvino    # serves OpenVINO IR models via OVMS
-  # - tts      # in-process TTS engines (Qwen, Supertonic, …)
+  - llamacpp           # serves GGUF models via llama-server
+  - openvino           # serves OpenVINO IR models via OVMS
+  # - tts             # in-process TTS engines (Qwen, Supertonic, …)
+  # - privacy_filter  # in-process PII masking via openai/privacy-filter (HF)
 
 # Backend binary configuration
 backend:
@@ -231,6 +232,18 @@ models:
     tts_engine: supertonic
     target_device: xpu
     vram_mb: 2000
+
+  # --- Privacy filter (in-process, Hugging Face token-classification) ---
+  # Used by litellm's Generic Guardrail API for PII masking in prompts.
+  # The model path can be a local copy or a Hugging Face model ID.
+  # Requires `privacy_filter` in enabled_backends and the 'transformers'
+  # + 'torch' packages installed.
+  - name: "privacy-filter"
+    path: "/mnt/models/privacy-filter"   # local copy of openai/privacy-filter
+    backend: privacy_filter
+    model_type: classification
+    vram_mb: 1024
+    unload_time: -1        # keep loaded (model is small and cheap)
 
   # --- Embedding model (llama.cpp example) ---
   - name: "bge-m3-gguf"
