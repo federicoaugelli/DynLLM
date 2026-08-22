@@ -3,18 +3,20 @@
 Agnostic OpenAI-compatible proxy for dynamic model loading and unloading.
 
 DynLLM sits between your OpenAI-compatible client (OpenWebUI, LangChain, curl, …) and
-your local inference backends (llama.cpp, OpenVINO Model Server, and/or Hugging Face transformers). It automatically
-loads models on demand, tracks VRAM usage, evicts models when memory is tight, and
-unloads idle models after a configurable timeout.
+your local inference backends (llama.cpp, OpenVINO Model Server, Hugging Face transformers,
+plus in-process TTS engines and a PII privacy filter). It automatically loads models on
+demand, tracks VRAM usage, evicts models when memory is tight, and unloads idle models
+after a configurable timeout.
 
 ---
 
 ## Features
 
 - **OpenAI-compatible API** – `/v1/chat/completions`, `/v1/completions`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/rerank`, `/v1/models`
+- **litellm guardrail API** – `/beta/litellm_basic_guardrail_api` for PII masking via the in-process privacy filter
 - **Dynamic loading** – models are started on first request and stopped when idle
 - **VRAM budgeting** – LIFO eviction keeps total GPU memory within a configured limit
-- **Multi-backend** – supports llama.cpp (GGUF), OpenVINO Model Server (IR), and `transformers serve`
+- **Multi-backend** – supports llama.cpp (GGUF), OpenVINO Model Server (IR), `transformers serve`, in-process TTS engines (Qwen3-TTS, Supertonic), and the `privacy_filter` PII-masking backend
 - **Per-model idle timeout** – override the global timeout per model, or set `inf`/`-1` to never auto-unload
 - **Startup preloading** – specify models to load when DynLLM starts
 - **Safe mid-generation** – active inference requests are never interrupted by eviction
@@ -30,6 +32,8 @@ unloads idle models after a configurable timeout.
   - **llama.cpp** – build `llama-server` from [ggerganov/llama.cpp](https://github.com/ggerganov/llama.cpp)
   - **OpenVINO Model Server** – see the [OVMS installation guide](https://docs.openvino.ai/2024/ovms_docs_deploying_server.html)
   - **Hugging Face transformers** – install `transformers[serving]`; for Intel GPUs install torch XPU wheels first
+  - **TTS engines** (optional, `backend: tts`) – install the engine package plus `soundfile`
+  - **Privacy filter** (optional, `backend: privacy_filter`) – needs `transformers` and `torch`
 
 ---
 
@@ -67,7 +71,7 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `server.port` | `8000` | Listen port |
 | `total_vram_mb` | `8192` | VRAM budget in MB; eviction fires when exceeded |
 | `idle_timeout_seconds` | `300` | Global idle auto-unload timeout (seconds) |
-| `enabled_backends` | `[llamacpp, openvino]` | Active backends |
+| `enabled_backends` | `[llamacpp, openvino]` | Active backends (`llamacpp`, `openvino`, `transformers`, `tts`, `privacy_filter`) |
 | `models_dir` | — | Optional base dir for relative model paths |
 | `db_path` | `dynllm_state.db` | SQLite state database path |
 | `log_level` | `info` | `debug` / `info` / `warning` / `error` |
@@ -89,8 +93,8 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 |---|---|---|
 | `name` | yes | Unique model ID; used as the `model` field in API requests |
 | `path` | yes | Path to the `.gguf` file, OpenVINO IR directory, or local Hugging Face model directory |
-| `backend` | yes | `llamacpp`, `openvino`, or `transformers` |
-| `model_type` | no | `llm`, `transcription`, `speech`, `image_generation`, `embedding`, `rerank`, `classification`, `detection`, `segmentation`, `ocr`. Default: `llm` |
+| `backend` | yes | `llamacpp`, `openvino`, `transformers`, `tts`, or `privacy_filter` |
+| `model_type` | no | `llm`, `transcription`, `speech`, `image_generation`, `embedding`, `rerank`, `classification`, `detection`, `segmentation`, `ocr`. Default: `llm`. Note: `speech` is served by `backend: tts` or `transformers` (not OpenVINO); `classification` is reserved for `backend: privacy_filter` |
 | `vram_mb` | yes | Estimated VRAM in MB when loaded (used for eviction math) |
 | `target_device` | no | OpenVINO target device (`CPU`, `GPU`, `NPU`). Default: `CPU` |
 | `n_gpu_layers` | no | llama.cpp only – GPU layers (`-1` = all). Default: `-1` |
@@ -105,7 +109,20 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `attn_implementation` | no | transformers only – `auto`, `eager`, `sdpa`, `flash_attention_2`, `flash_attention_3`, `flex_attention` |
 | `model_timeout` | no | transformers only – backend-side idle timeout in seconds |
 | `revision` | no | transformers only – HF revision rendered as `model@revision` |
-| `unload_time` | no | Per-model idle timeout (seconds). Overrides `idle_timeout_seconds`. Use `-1` or `inf` to never auto-unload |
+| `tts_engine` | yes (tts only) | TTS engine name (`qwen`, `supertonic`). Required when `backend: tts` |
+| `tool_parser` | no | openvino LLM only – parser for tool-call extraction (`llama3`, `hermes3`, `phi4`, `mistral`, `gptoss`, `qwen3coder`, `devstral`, `lfm2`) |
+| `reasoning_parser` | no | openvino LLM only – parser for reasoning-content extraction (`qwen3`, `gptoss`) |
+| `enable_tool_guided_generation` | no | openvino LLM only – guide generation to follow the tool-call schema |
+| `draft_model` | no | openvino LLM only – path to a smaller OpenVINO IR draft model for speculative decoding |
+| `draft_model_vram_mb` | no | openvino LLM only – extra VRAM (MB) used by the draft model; added to `vram_mb` for eviction math |
+| `kv_cache_precision` | no | openvino LLM only – KV cache precision (`u8` for 8-bit cache, halves memory) |
+| `cache_size` | no | openvino LLM only – fixed KV cache size in GB (default: dynamic) |
+| `enable_prefix_caching` | no | openvino LLM only – cache repeated prompt prefixes (default: enabled in OVMS) |
+| `max_num_seqs` | no | openvino LLM only – max sequences processed together (default: 256) |
+| `max_num_batched_tokens` | no | openvino LLM only – max tokens per scheduler step |
+| `dynamic_split_fuse` | no | openvino LLM only – split prefill/decode across batches (default: enabled in OVMS) |
+| `model_distribution_policy` | no | openvino LLM only – `TENSOR_PARALLEL` or `PIPELINE_PARALLEL` for multi-device setups |
+| `unload_time` | no | Per-model idle timeout (seconds). Overrides `idle_timeout_seconds`. Use `-1`, `inf`, `infinity`, or `never` to never auto-unload |
 
 ### Example config
 
@@ -121,6 +138,8 @@ enabled_backends:
   - llamacpp
   - openvino
   - transformers
+  - tts
+  - privacy_filter
 
 backend:
   llamacpp_binary: "llama-server"
@@ -158,12 +177,36 @@ models:
     target_device: CPU
     vram_mb: 0
 
-  - name: "speecht5-ov"
-    path: "/mnt/models/openvino/speecht5-ov"
-    backend: openvino
+  # In-process TTS engine (Qwen3-TTS); model is loaded directly inside DynLLM
+  - name: "qwen3-tts"
+    path: "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+    backend: tts
     model_type: speech
-    target_device: CPU
-    vram_mb: 0
+    tts_engine: qwen
+    target_device: xpu
+    vram_mb: 3000
+
+  # In-process privacy filter for PII masking (litellm guardrail API)
+  - name: "privacy-filter"
+    path: "/mnt/models/privacy-filter"   # local copy of openai/privacy-filter
+    backend: privacy_filter
+    model_type: classification
+    vram_mb: 1024
+    unload_time: -1                      # keep loaded
+
+  # OpenVINO LLM with speculative decoding and KV cache optimization
+  - name: "codellama-7b-sd"
+    path: "/mnt/models/openvino/codellama-7b-instruct-ov"
+    backend: openvino
+    model_type: llm
+    target_device: GPU
+    vram_mb: 12000
+    draft_model: "/mnt/models/openvino/llama-135m-draft-ov"
+    draft_model_vram_mb: 500
+    kv_cache_precision: u8
+    cache_size: 8
+    enable_prefix_caching: true
+    max_num_seqs: 128
 
   - name: "qwen25-3b-hf"
     path: "/mnt/models/huggingface/Qwen2.5-3B-Instruct"
@@ -216,7 +259,7 @@ OpenAI-compatible text completions. Supports streaming.
 
 ### `POST /v1/audio/transcriptions`
 
-OpenAI-compatible speech-to-text endpoint. DynLLM accepts the standard multipart request and proxies it to OVMS or `transformers serve`, depending on the configured backend.
+OpenAI-compatible speech-to-text endpoint. DynLLM accepts the standard multipart request and proxies it to OVMS or `transformers serve`, depending on the configured backend. On a cold start (model not loaded yet) transient failures are retried automatically so the client does not see a 400/404/503 while the backend is still initialising.
 
 ```bash
 curl http://localhost:8000/v1/audio/transcriptions \
@@ -226,7 +269,7 @@ curl http://localhost:8000/v1/audio/transcriptions \
 
 ### `POST /v1/audio/translations`
 
-OpenAI-compatible speech translation endpoint. This uses the same OpenVINO transcription models and maps to OVMS `/v3/audio/translations`.
+OpenAI-compatible speech translation endpoint. This uses the same OpenVINO transcription models and maps to OVMS `/v3/audio/translations`. Cold-start retries apply as for transcriptions.
 
 ```bash
 curl http://localhost:8000/v1/audio/translations \
@@ -236,12 +279,12 @@ curl http://localhost:8000/v1/audio/translations \
 
 ### `POST /v1/audio/speech`
 
-OpenAI-compatible text-to-speech endpoint. OVMS currently returns WAV audio.
+OpenAI-compatible text-to-speech endpoint. Served by the in-process `tts` backend (`tts_engine: qwen` / `supertonic`) or, with `transformers`, proxied to `/v1/audio/speech`. The `tts` backend currently returns WAV audio (or the format requested via `response_format`).
 
 ```bash
 curl http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
-  -d '{"model":"speecht5-ov","input":"Hello from DynLLM"}' \
+  -d '{"model":"qwen3-tts","input":"Hello from DynLLM"}' \
   -o speech.wav
 ```
 
@@ -275,9 +318,29 @@ curl http://localhost:8000/v1/rerank \
   -d '{"model":"bge-reranker-v2-gguf","query":"what is AI?","documents":["AI is...","ML is..."]}'
 ```
 
+### `POST /beta/litellm_basic_guardrail_api`
+
+litellm [Generic Guardrail API](https://docs.litellm.ai/docs/proxy/guardrails) contract for PII masking. It accepts texts and returns masked versions through the in-process `privacy_filter` backend. Configure it as a litellm guardrail:
+
+```yaml
+# litellm config.yaml
+guardrails:
+  - guardrail_name: "dynllm-pii-filter"
+    litellm_params:
+      guardrail: generic_guardrail_api
+      mode: pre_call
+      api_base: "http://localhost:8000"
+      additional_provider_specific_params:
+        model: "privacy-filter"      # DynLLM model name
+        mask_strategy: "replace"      # replace | redact | hash
+        # categories: ["private_email"]   # optional subset of entities
+```
+
+The request is answered with `action: NONE` when no PII was found and `action: GUARDRAIL_INTERVENED` (with masked texts) otherwise.
+
 ### KServe API (`/v2/models/{name}/...`)
 
-KServe v2 protocol passthrough for OpenVINO models. Supports classification, detection, segmentation, OCR, and other non-LLM models through OVMS.
+KServe v2 protocol passthrough for OpenVINO models. Supports detection, segmentation, OCR, embedding, and rerank models through OVMS. (`model_type: classification` is reserved for the `privacy_filter` backend.)
 
 ```bash
 # Model metadata
@@ -317,7 +380,8 @@ When a request arrives for any configured endpoint (`/v1/chat/completions`, `/v1
 2. If not loaded: checks whether enough VRAM is free.
 3. If not enough VRAM: evicts models in **LIFO order** (most recently loaded first),
    skipping any model currently serving a request.
-4. Starts the backend subprocess and waits for it to be ready.
+4. Starts the backend (a subprocess for llama.cpp/OVMS/transformers, or an
+   in-process engine for `tts` / `privacy_filter`) and waits for it to be ready.
 5. Proxies the request to the backend and streams the response back.
 
 ### Idle auto-unload
@@ -328,8 +392,9 @@ is stopped and its VRAM is freed. Models with active requests are never evicted.
 
 ### Per-model `unload_time`
 
-Set `unload_time: -1` (or `inf`) on a model to keep it permanently in VRAM unless
-VRAM pressure forces eviction or you manually unload it via `/admin/models/unload`.
+Set `unload_time: -1` (or `inf`, `infinity`, `never`) on a model to keep it
+permanently in VRAM unless VRAM pressure forces eviction or you manually unload
+it via `/admin/models/unload`.
 
 ### Startup preloading
 
@@ -394,21 +459,43 @@ lines in `systemd/dynllm.service`.
 
 - Serves **OpenVINO IR** model directories only (not GGUF).
 - One `ovms` process per loaded model.
-- `model_type: llm`, `model_type: embedding`, and `model_type: rerank` use the standard single-model OVMS config flow with the OpenAI-compatible `/v3/` endpoints (`/v3/chat/completions`, `/v3/embeddings`, `/v1/rerank`).
-- `model_type: transcription` and `model_type: speech` use OVMS audio task mode (`--task speech2text` / `--task text2speech`). Audio endpoints require OVMS `2025.4+`.
-- `model_type: image_generation` uses OVMS image generation task mode (`--task image_generation`) and exposes `/v3/images/generations` (OpenAI-compatible). Supports Stable Diffusion, SDXL, and FLUX.1 models in OpenVINO IR format.
-- `model_type: classification`, `detection`, `segmentation`, and `ocr` are served through the KServe v2 API (`/v2/models/{name}/infer`). These use the standard OVMS config flow and are accessible via any KServe-compatible client.
 - gRPC is disabled (`--port 0`); only the REST API is used.
+- How each `model_type` is started:
+  - `llm` – OVMS **task mode** (`--task text_generation`) and exposes the OpenAI-compatible `/v3/` endpoints (`/v3/chat/completions`, `/v3/completions`). Tool-calling, reasoning, speculative decoding, KV-cache and batching options are passed as OVMS flags (see `tool_parser`, `reasoning_parser`, `enable_tool_guided_generation`, `draft_model`, `kv_cache_precision`, `cache_size`, `enable_prefix_caching`, `max_num_seqs`, `max_num_batched_tokens`, `dynamic_split_fuse`, `model_distribution_policy`).
+  - `embedding` / `rerank` – standard single-model OVMS config flow (KServe v2 model registration) with the OpenAI-compatible `/v3/embeddings` and `/v1/rerank` endpoints.
+  - `transcription` – OVMS **audio task mode** (`--task speech2text`), proxied at `/v3/audio/transcriptions` and `/v3/audio/translations`. Requires OVMS `2025.4+`.
+  - `image_generation` – OVMS **image generation task mode** (`--task image_generation`), exposed at `/v3/images/generations` (OpenAI-compatible). Supports Stable Diffusion, SDXL, and FLUX.1 models in OpenVINO IR format.
+  - `detection` / `segmentation` / `ocr` – standard OVMS config flow, served through the KServe v2 API (`/v2/models/{name}/infer`).
+- `model_type: classification` is reserved for `backend: privacy_filter` and cannot be served via OVMS/KServe (see below).
+- `model_type: speech` is **not** supported by OpenVINO – use `backend: tts` (or `transformers`) instead.
 - Readiness is detected by model type:
-  - LLM/embedding/rerank/CV models: KServe Model Readiness endpoint (`GET /v2/models/{name}/ready`).
-  - Audio/image generation models: OVMS task mode does not register KServe models, so readiness is detected by probing the relevant `/v3/` endpoint with an OPTIONS request.
+  - Config-flow models (embedding/rerank/CV) and LLM task-mode models: KServe Model Readiness endpoint (`GET /v2/models/{name}/ready`).
+  - Audio (`transcription`): a silent WAV probe against `/v3/audio/transcriptions`.
+  - `image_generation`: an OPTIONS probe against `/v3/images/generations`.
+
+### TTS (in-process)
+
+- Serves `model_type: speech` with `backend: tts`. The model is loaded **directly in the DynLLM process** (no subprocess) via a `TTSEngine` plugin; synthesis runs in a thread pool.
+- Selects the engine with `tts_engine`:
+  - `qwen` – Qwen3-TTS (`uv pip install qwen-tts soundfile`). `path` is a Hugging Face model ID or local directory.
+  - `supertonic` – Supertonic (`uv pip install supertonic soundfile`). `path` is ignored; models are auto-downloaded.
+- `target_device` selects the execution device (e.g. `xpu`, `cpu`).
+- Exposed via `POST /v1/audio/speech`.
+
+### Privacy filter (in-process)
+
+- Serves `model_type: classification` with `backend: privacy_filter`. Loads `openai/privacy-filter` (or a local copy) via the Hugging Face `token-classification` pipeline directly inside the proxy process.
+- Detects PII entities (`private_person`, `private_email`, `private_phone`, `private_address`, `private_url`, `private_date`, `account_number`, `secret`, …).
+- Mask strategies: `replace` (category tag such as `[EMAIL]`), `redact` (`[REDACTED]`), `hash` (`[REDACTED_<hash>]`).
+- Consumed by litellm through `POST /beta/litellm_basic_guardrail_api`.
+- Requires the `transformers` and `torch` packages in the DynLLM environment.
 
 ### Hugging Face transformers
 
 - Serves local Hugging Face model directories through `transformers serve`.
 - One `transformers serve` process per loaded model.
 - DynLLM keeps the public model alias from `config.yaml` and rewrites backend requests to the local model path expected by `transformers serve`.
-- Supports `model_type: llm` and `model_type: transcription`.
+- Supports `model_type: llm`, `model_type: transcription`, and `model_type: speech`.
 - Relevant config fields: `device`, `dtype`, `quantization`, `trust_remote_code`, `compile_model`, `continuous_batching`, `attn_implementation`, `model_timeout`, `revision`.
 - For Intel GPUs, install torch from the XPU wheel index before installing `transformers[serving]`:
 
