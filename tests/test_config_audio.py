@@ -34,7 +34,9 @@ def test_target_device_is_normalized() -> None:
 
 
 def test_llamacpp_rejects_non_llm_model_type() -> None:
-    with pytest.raises(ValueError, match="llamacpp supports model_type=llm, embedding, and rerank"):
+    with pytest.raises(
+        ValueError, match="llamacpp supports model_type=llm, embedding, and rerank"
+    ):
         ModelConfig(
             name="bad-whisper",
             path=Path("/tmp/bad-whisper.gguf"),
@@ -45,7 +47,9 @@ def test_llamacpp_rejects_non_llm_model_type() -> None:
 
 
 def test_openvino_rejects_speech_model_type() -> None:
-    with pytest.raises(ValueError, match="openvino no longer supports model_type=speech"):
+    with pytest.raises(
+        ValueError, match="openvino no longer supports model_type=speech"
+    ):
         ModelConfig(
             name="bad-speech-ov",
             path=Path("/tmp/bad-speech"),
@@ -67,13 +71,35 @@ def test_tts_requires_engine_field() -> None:
 
 
 def test_tts_rejects_non_speech_model_type() -> None:
-    with pytest.raises(ValueError, match="tts backend only supports model_type=speech"):
+    with pytest.raises(ValueError, match="tts supports model_type=speech"):
         ModelConfig(
             name="bad-llm-tts",
             path=Path("/tmp/bad-llm-tts"),
             backend=BackendType.tts,
             model_type=ModelType.llm,
             tts_engine="qwen",
+            vram_mb=1,
+        )
+
+
+def test_neutronstar_accepts_llm_model_type() -> None:
+    model = ModelConfig(
+        name="ornith",
+        path=Path("/tmp/ornith.gguf"),
+        backend=BackendType.neutronstar,
+        model_type=ModelType.llm,
+        vram_mb=13000,
+    )
+    assert model.backend == BackendType.neutronstar
+
+
+def test_neutronstar_rejects_non_llm_model_type() -> None:
+    with pytest.raises(ValueError, match="neutronstar supports model_type=llm"):
+        ModelConfig(
+            name="bad-ns",
+            path=Path("/tmp/bad-ns"),
+            backend=BackendType.neutronstar,
+            model_type=ModelType.embedding,
             vram_mb=1,
         )
 

@@ -34,11 +34,13 @@ enabled_backends:
   - openvino           # serves OpenVINO IR models via OVMS
   # - tts             # in-process TTS engines (Qwen, Supertonic, …)
   # - privacy_filter  # in-process PII masking via openai/privacy-filter (HF)
+  # - neutronstar     # scaffold for NeutronStar ns-server (not yet functional)
 
 # Backend binary configuration
 backend:
   llamacpp_binary: "llama-server"   # or /full/path/to/llama-server
   ovms_binary: "ovms"               # or /full/path/to/ovms
+  # neutronstar_binary: "ns-server" # scaffold, not yet functional
   # Port range allocated to backend subprocesses (one port per loaded model)
   port_range_start: 9100
   port_range_end: 9200

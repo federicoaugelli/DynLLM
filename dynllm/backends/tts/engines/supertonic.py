@@ -4,7 +4,7 @@ import logging
 import os
 import tempfile
 
-from dynllm.backends.tts.base import TTSEngine
+from dynllm.backends.tts.base import TTSEngine, empty_torch_cache
 
 logger = logging.getLogger(__name__)
 
@@ -12,9 +12,9 @@ _DEFAULT_VOICE = "M1"
 
 
 class SupertonicEngine(TTSEngine):
-    """TTS engine for Supertonic TTS models."""
+    """TTS engine for Supertonic TTS models (models are auto-downloaded)."""
 
-    async def load(self) -> None:
+    def load(self) -> None:
         from supertonic import TTS
 
         logger.info("Loading Supertonic TTS …")
@@ -22,27 +22,15 @@ class SupertonicEngine(TTSEngine):
         self._loaded = True
         logger.info("Supertonic TTS loaded")
 
-    async def unload(self) -> None:
-        if hasattr(self, "_tts"):
-            del self._tts
+    def unload(self) -> None:
+        if not self._loaded:
+            return
+        del self._tts
         self._loaded = False
-
-        import gc
-
-        gc.collect()
-        try:
-            import torch
-
-            if hasattr(torch, "xpu") and torch.xpu.is_available():
-                torch.xpu.empty_cache()
-            elif hasattr(torch, "cuda") and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
-
+        empty_torch_cache()
         logger.info("Supertonic TTS unloaded")
 
-    async def synthesize(
+    def synthesize(
         self,
         text: str,
         *,
@@ -53,8 +41,7 @@ class SupertonicEngine(TTSEngine):
         if not self._loaded:
             raise RuntimeError("Supertonic TTS not loaded")
 
-        voice_name = voice or _DEFAULT_VOICE
-        style = self._tts.get_voice_style(voice_name=voice_name)
+        style = self._tts.get_voice_style(voice_name=voice or _DEFAULT_VOICE)
         wav, _ = self._tts.synthesize(text, voice_style=style, lang="en")
 
         tmp = tempfile.NamedTemporaryFile(
@@ -63,7 +50,7 @@ class SupertonicEngine(TTSEngine):
         try:
             tmp.close()
             self._tts.save_audio(wav, tmp.name)
-            with open(tmp.name, "rb") as f:
-                return f.read()
+            with open(tmp.name, "rb") as fh:
+                return fh.read()
         finally:
             os.unlink(tmp.name)

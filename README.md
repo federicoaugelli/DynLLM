@@ -16,7 +16,7 @@ after a configurable timeout.
 - **litellm guardrail API** – `/beta/litellm_basic_guardrail_api` for PII masking via the in-process privacy filter
 - **Dynamic loading** – models are started on first request and stopped when idle
 - **VRAM budgeting** – LIFO eviction keeps total GPU memory within a configured limit
-- **Multi-backend** – supports llama.cpp (GGUF), OpenVINO Model Server (IR), `transformers serve`, in-process TTS engines (Qwen3-TTS, Supertonic), and the `privacy_filter` PII-masking backend
+- **Multi-backend** – supports llama.cpp (GGUF), OpenVINO Model Server (IR), `transformers serve`, in-process TTS engines (Qwen3-TTS, Supertonic), the `privacy_filter` PII-masking backend, and a scaffolded NeutronStar (`ns-server`) backend
 - **Per-model idle timeout** – override the global timeout per model, or set `inf`/`-1` to never auto-unload
 - **Startup preloading** – specify models to load when DynLLM starts
 - **Safe mid-generation** – active inference requests are never interrupted by eviction
@@ -34,6 +34,9 @@ after a configurable timeout.
   - **Hugging Face transformers** – install `transformers[serving]`; for Intel GPUs install torch XPU wheels first
   - **TTS engines** (optional, `backend: tts`) – install the engine package plus `soundfile`
   - **Privacy filter** (optional, `backend: privacy_filter`) – needs `transformers` and `torch`
+  - **NeutronStar** (optional, `backend: neutronstar`) – build `ns-server` from the NeutronStar
+    project. The integration is currently a **scaffold**: the backend type and config are wired
+    up, but launching `ns-server` is not implemented yet.
 
 ---
 
@@ -71,7 +74,7 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `server.port` | `8000` | Listen port |
 | `total_vram_mb` | `8192` | VRAM budget in MB; eviction fires when exceeded |
 | `idle_timeout_seconds` | `300` | Global idle auto-unload timeout (seconds) |
-| `enabled_backends` | `[llamacpp, openvino]` | Active backends (`llamacpp`, `openvino`, `transformers`, `tts`, `privacy_filter`) |
+| `enabled_backends` | `[llamacpp, openvino]` | Active backends (`llamacpp`, `openvino`, `transformers`, `tts`, `privacy_filter`, `neutronstar`) |
 | `models_dir` | — | Optional base dir for relative model paths |
 | `db_path` | `dynllm_state.db` | SQLite state database path |
 | `log_level` | `info` | `debug` / `info` / `warning` / `error` |
@@ -84,6 +87,7 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `llamacpp_binary` | `llama-server` | Path or name of the llama-server binary |
 | `ovms_binary` | `ovms` | Path or name of the OVMS binary |
 | `transformers_binary` | `transformers` | Path or name of the Hugging Face transformers CLI |
+| `neutronstar_binary` | `ns-server` | Path or name of the NeutronStar `ns-server` binary (scaffold) |
 | `port_range_start` | `9100` | Start of port range for backend subprocesses |
 | `port_range_end` | `9200` | End of port range for backend subprocesses |
 
@@ -93,7 +97,7 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 |---|---|---|
 | `name` | yes | Unique model ID; used as the `model` field in API requests |
 | `path` | yes | Path to the `.gguf` file, OpenVINO IR directory, or local Hugging Face model directory |
-| `backend` | yes | `llamacpp`, `openvino`, `transformers`, `tts`, or `privacy_filter` |
+| `backend` | yes | `llamacpp`, `openvino`, `transformers`, `tts`, `privacy_filter`, or `neutronstar` |
 | `model_type` | no | `llm`, `transcription`, `speech`, `image_generation`, `embedding`, `rerank`, `classification`, `detection`, `segmentation`, `ocr`. Default: `llm`. Note: `speech` is served by `backend: tts` or `transformers` (not OpenVINO); `classification` is reserved for `backend: privacy_filter` |
 | `vram_mb` | yes | Estimated VRAM in MB when loaded (used for eviction math) |
 | `target_device` | no | OpenVINO target device (`CPU`, `GPU`, `NPU`). Default: `CPU` |
@@ -509,6 +513,12 @@ uv pip install "transformers[serving]"
 - In practice, bitsandbytes is most proven on CUDA. On Intel XPU it may work, but treat it as deployment-specific and validate the exact torch + bitsandbytes stack on your target machine before relying on it in production.
 - Quantization is enabled only for `model_type: llm` in DynLLM.
 - DynLLM still applies the same VRAM accounting, LIFO eviction, and idle unload rules used for llama.cpp and OVMS.
+
+### NeutronStar (scaffold)
+
+- Reserved for NeutronStar `ns-server`, a custom MoE inference engine for Intel Arc GPUs.
+- **Scaffold only**: `backend: neutronstar` is validated and registered, but launching `ns-server` is not implemented yet (`start()` raises `NotImplementedError`). It is off by default and will be wired up once the server API is stable.
+- Expected shape once enabled: one `ns-server <merged.gguf> --alias <name>` process per model, readiness via `GET /health`, inference proxied to `POST /v1/chat/completions` (OpenAI-compatible, streaming and non-streaming).
 
 ---
 

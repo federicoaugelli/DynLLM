@@ -6,18 +6,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dynllm.api import routes
+from dynllm.backends.tts import TTSBackend
 from dynllm.backends.tts.base import TTSEngine
 from dynllm.main import create_app
 
 
 class DummyTTSEngine(TTSEngine):
-    async def load(self) -> None:
+    def load(self) -> None:
         self._loaded = True
 
-    async def unload(self) -> None:
+    def unload(self) -> None:
         self._loaded = False
 
-    async def synthesize(self, text, *, voice=None, response_format="wav", speed=1.0):
+    def synthesize(self, text, *, voice=None, response_format="wav", speed=1.0):
         return b"fake-audio-data"
 
 
@@ -25,24 +26,29 @@ class DummyVRAM:
     def __init__(self) -> None:
         self.loaded_models: list[str] = []
         self._ports: dict[str, int] = {}
+        self._instances: dict[str, TTSBackend] = {}
 
     async def ensure_loaded(self, model):
         self.loaded_models.append(model.name)
         if model.name not in self._ports:
             self._ports[model.name] = 9123
+            tts = TTSBackend()
+            tts._engine = DummyTTSEngine(model_path="", device="cpu")
+            tts._engine._loaded = True
+            self._instances[model.name] = tts
         return self._ports[model.name]
 
     async def get_port(self, model_name: str) -> int | None:
         return self._ports.get(model_name)
 
-    def get_backend(self, backend_type):
-        from dynllm.backends.tts import TTSBackend
+    def get_instance(self, model_name: str):
+        return self._instances.get(model_name)
 
-        tts = TTSBackend()
-        tts._engine = DummyTTSEngine(model_path="", device="cpu")
-        tts._engine._loaded = True
-        tts._pid = id(tts._engine)
-        return tts
+    async def increment_active(self, model_name: str) -> None:
+        pass
+
+    async def decrement_active(self, model_name: str) -> None:
+        pass
 
 
 class DummyState:
@@ -90,7 +96,8 @@ models:
 def client(app, monkeypatch: pytest.MonkeyPatch):
     dummy_vram = DummyVRAM()
     dummy_state = DummyState()
-    routes.set_managers(dummy_vram, dummy_state)
+    app.state.vram_manager = dummy_vram
+    app.state.state_manager = dummy_state
 
     forwarded: list[tuple[int, str, bytes]] = []
 
@@ -167,7 +174,7 @@ def test_transcription_rejects_llm_model(client):
 
 
 def test_audio_transcriptions_retries_on_cold_start(client, monkeypatch):
-    """A 400 on the first cold-start attempt should be retried."""
+    """A transient failure on the first cold-start attempt should be retried."""
 
     async def _noop_sleep(_s: float) -> None:
         return None
@@ -200,7 +207,7 @@ def test_audio_transcriptions_retries_on_cold_start(client, monkeypatch):
 
 
 def test_audio_transcriptions_no_retry_when_already_loaded(client, monkeypatch):
-    """A 400 for an already-loaded model should be returned immediately."""
+    """A failure for an already-loaded model should be returned immediately."""
 
     async def _noop_sleep(_s: float) -> None:
         return None

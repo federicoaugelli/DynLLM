@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import abc
 
+from dynllm.backends.gpu import empty_torch_cache
+
+__all__ = ["TTSEngine", "empty_torch_cache"]
+
 
 class TTSEngine(abc.ABC):
-    """Abstract base for a TTS model implementation.
+    """A concrete text-to-speech model implementation.
 
-    Each engine encapsulates the model-specific loading, unloading, and
-    synthesis logic.  Engines are instantiated by ``TTSBackend`` which
-    manages their lifecycle and provides the in-process inference endpoint.
+    Engines are synchronous and blocking: they are always driven from
+    ``TTSBackend``'s thread pool so the event loop stays responsive.
     """
 
     def __init__(self, model_path: str, device: str) -> None:
@@ -21,15 +24,15 @@ class TTSEngine(abc.ABC):
         return self._loaded
 
     @abc.abstractmethod
-    async def load(self) -> None:
-        """Load the model into memory (GPU/CPU). Called once at startup."""
+    def load(self) -> None:
+        """Load the model into memory."""
 
     @abc.abstractmethod
-    async def unload(self) -> None:
-        """Free the model from memory. Called at shutdown or eviction."""
+    def unload(self) -> None:
+        """Free the model from memory."""
 
     @abc.abstractmethod
-    async def synthesize(
+    def synthesize(
         self,
         text: str,
         *,

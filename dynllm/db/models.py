@@ -97,3 +97,4 @@ class ModelState(SQLModel, table=True):
         self.status = ModelStatus.error
         self.pid = None
         self.port = None
+        self.load_order = 0

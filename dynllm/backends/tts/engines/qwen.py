@@ -4,18 +4,17 @@ import logging
 import os
 import tempfile
 
-from dynllm.backends.tts.base import TTSEngine
+from dynllm.backends.tts.base import TTSEngine, empty_torch_cache
 
 logger = logging.getLogger(__name__)
 
 
 class QwenTTSEngine(TTSEngine):
-    """TTS engine for Qwen3-TTS models (no voice cloning, plain TTS)."""
+    """TTS engine for Qwen3-TTS models (plain TTS, no voice cloning)."""
 
-    async def load(self) -> None:
-        from qwen_tts import Qwen3TTSModel
-
+    def load(self) -> None:
         import torch
+        from qwen_tts import Qwen3TTSModel
 
         logger.info(
             "Loading Qwen3-TTS model '%s' on device '%s' …",
@@ -30,28 +29,15 @@ class QwenTTSEngine(TTSEngine):
         self._loaded = True
         logger.info("Qwen3-TTS model loaded")
 
-    async def unload(self) -> None:
+    def unload(self) -> None:
         if not self._loaded:
             return
         del self._model
         self._loaded = False
-
-        import gc
-
-        gc.collect()
-        try:
-            import torch
-
-            if hasattr(torch, "xpu") and torch.xpu.is_available():
-                torch.xpu.empty_cache()
-            elif hasattr(torch, "cuda") and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
-
+        empty_torch_cache()
         logger.info("Qwen3-TTS model unloaded")
 
-    async def synthesize(
+    def synthesize(
         self,
         text: str,
         *,
@@ -64,18 +50,15 @@ class QwenTTSEngine(TTSEngine):
 
         import soundfile as sf
 
-        wavs, sr = self._model.generate(
-            text=text,
-            language="English",
-        )
+        wavs, sample_rate = self._model.generate(text=text, language="English")
 
         tmp = tempfile.NamedTemporaryFile(
             suffix=f".{response_format.lower()}", delete=False
         )
         try:
             tmp.close()
-            sf.write(tmp.name, wavs[0], sr)
-            with open(tmp.name, "rb") as f:
-                return f.read()
+            sf.write(tmp.name, wavs[0], sample_rate)
+            with open(tmp.name, "rb") as fh:
+                return fh.read()
         finally:
             os.unlink(tmp.name)

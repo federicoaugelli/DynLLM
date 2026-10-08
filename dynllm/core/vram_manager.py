@@ -1,17 +1,15 @@
 """
-VRAM Manager – central orchestrator for model load/unload decisions.
+Orchestrator: model load/unload decisions and VRAM accounting.
 
-Rules (from the spec):
-  1. Before loading a model, check if there is enough free VRAM.
-  2. If not enough VRAM: evict the *least-recently loaded* model (LIFO order)
-     until enough space is freed.
-  3. If multiple models fit simultaneously, none are evicted.
-  4. A model that has not been used for ``idle_timeout_seconds`` is
-     automatically unloaded (handled by the scheduler, not this class).
+Rules:
+  1. Before loading a model, check that enough VRAM is free.
+  2. If not, evict the *most recently loaded* model (LIFO) until it fits.
+  3. If several models fit simultaneously, none are evicted.
+  4. A model idle past its effective timeout is unloaded by the scheduler.
 
-This manager is the single point of truth for load/unload operations.
-All public methods are async and serialised through an internal lock to
-prevent concurrent double-loads or race conditions.
+Each loaded model owns its own backend instance; all state transitions are
+serialised through an internal lock so the on-disk state can never disagree
+with the running processes.
 """
 
 from __future__ import annotations
@@ -20,51 +18,43 @@ import asyncio
 import logging
 from typing import Optional
 
-from dynllm.backends.base import Backend
-from dynllm.backends.llamacpp import LlamaCppBackend
-from dynllm.backends.openvino import OpenVINOBackend
-from dynllm.backends.privacy_filter import PrivacyFilterBackend
-from dynllm.backends.transformers import TransformersBackend
-from dynllm.backends.tts import TTSBackend
-from dynllm.core.config import BackendType, ModelConfig, ModelType, Settings
+from dynllm.backends import Backend, BackendRegistry
+from dynllm.core.config import ModelConfig, ModelType, Settings
 from dynllm.db.manager import StateManager
 from dynllm.db.models import ModelStatus
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Active-request tracking
-# ---------------------------------------------------------------------------
-# Maps model_name -> number of in-flight inference requests.
-# Maintained outside the VRAMManager lock so route handlers can update it
-# without acquiring the heavy orchestration lock.
-_active_requests: dict[str, int] = {}
-_active_lock = asyncio.Lock()
+# Readiness budget per workload; ASR models load slowly.
+_READY_TIMEOUT = 60.0
+_READY_TIMEOUT_TRANSCRIPTION = 300.0
 
 
-async def increment_active(model_name: str) -> None:
-    """Signal that a new inference request for *model_name* has started."""
-    async with _active_lock:
-        _active_requests[model_name] = _active_requests.get(model_name, 0) + 1
+class RequestTracker:
+    """Counts in-flight inference requests per model (non-blocking reads)."""
 
+    def __init__(self) -> None:
+        self._counts: dict[str, int] = {}
+        self._lock = asyncio.Lock()
 
-async def decrement_active(model_name: str) -> None:
-    """Signal that an inference request for *model_name* has finished."""
-    async with _active_lock:
-        count = _active_requests.get(model_name, 0)
-        if count > 1:
-            _active_requests[model_name] = count - 1
-        else:
-            _active_requests.pop(model_name, None)
+    async def increment(self, model_name: str) -> None:
+        async with self._lock:
+            self._counts[model_name] = self._counts.get(model_name, 0) + 1
 
+    async def decrement(self, model_name: str) -> None:
+        async with self._lock:
+            count = self._counts.get(model_name, 0)
+            if count > 1:
+                self._counts[model_name] = count - 1
+            else:
+                self._counts.pop(model_name, None)
 
-def get_active_count(model_name: str) -> int:
-    """Return the number of in-flight requests for *model_name* (non-blocking)."""
-    return _active_requests.get(model_name, 0)
+    def count(self, model_name: str) -> int:
+        return self._counts.get(model_name, 0)
 
 
 class PortAllocator:
-    """Simple sequential port allocator within a configured range."""
+    """Sequential port allocator within a configured range."""
 
     def __init__(self, start: int, end: int) -> None:
         self._start = start
@@ -75,66 +65,44 @@ class PortAllocator:
     async def allocate(self) -> int:
         async with self._lock:
             port = self._next
-            self._next += 1
-            if self._next > self._end:
-                self._next = self._start
+            self._next = self._next + 1 if self._next < self._end else self._start
             return port
 
 
 class VRAMManager:
-    """
-    Orchestrates model loading, unloading, and VRAM accounting.
-
-    This is intentionally kept stateless with respect to process handles –
-    all persistent state is in the StateManager (SQLite). VRAM accounting
-    is derived from the persisted ``vram_mb`` fields.
-    """
+    """Owns backend instances and decides what stays resident in VRAM."""
 
     def __init__(self, settings: Settings, state: StateManager) -> None:
         self._settings = settings
         self._state = state
-        self._lock = asyncio.Lock()
-
-        # Instantiate backends for enabled backend types only
-        self._backends: dict[BackendType, Backend] = {}
-        if BackendType.llamacpp in settings.enabled_backends:
-            self._backends[BackendType.llamacpp] = LlamaCppBackend(
-                binary=settings.backend.llamacpp_binary
-            )
-        if BackendType.openvino in settings.enabled_backends:
-            self._backends[BackendType.openvino] = OpenVINOBackend(
-                binary=settings.backend.ovms_binary
-            )
-        if BackendType.transformers in settings.enabled_backends:
-            self._backends[BackendType.transformers] = TransformersBackend(
-                binary=settings.backend.transformers_binary
-            )
-        if BackendType.tts in settings.enabled_backends:
-            self._backends[BackendType.tts] = TTSBackend()
-        if BackendType.privacy_filter in settings.enabled_backends:
-            self._backends[BackendType.privacy_filter] = PrivacyFilterBackend()
-
+        self._registry = BackendRegistry(settings)
         self._ports = PortAllocator(
             settings.backend.port_range_start,
             settings.backend.port_range_end,
         )
+        self._lock = asyncio.Lock()
+        self._instances: dict[str, Backend] = {}
+        self._requests = RequestTracker()
 
     # ------------------------------------------------------------------
-    # Public API
+    # Request tracking (delegated to the tracker)
     # ------------------------------------------------------------------
 
-    def _total_vram_mb(self, model: ModelConfig) -> int:
-        """Return total VRAM required for the model, including draft model."""
-        return model.vram_mb + (model.draft_model_vram_mb or 0)
+    async def increment_active(self, model_name: str) -> None:
+        await self._requests.increment(model_name)
+
+    async def decrement_active(self, model_name: str) -> None:
+        await self._requests.decrement(model_name)
+
+    def active_count(self, model_name: str) -> int:
+        return self._requests.count(model_name)
+
+    # ------------------------------------------------------------------
+    # Public lifecycle API
+    # ------------------------------------------------------------------
 
     async def ensure_loaded(self, model: ModelConfig) -> int:
-        """
-        Ensure *model* is loaded and ready, returning its listening port.
-
-        If the model is already loaded the call is a no-op (beyond updating
-        last_used_at).  If not, VRAM is freed as needed and the model is
-        loaded.
-        """
+        """Ensure *model* is loaded and return its listening port."""
         async with self._lock:
             state = await self._state.get(model.name)
 
@@ -149,22 +117,17 @@ class VRAMManager:
             ):
                 raise RuntimeError(
                     f"Model '{model.name}' is currently transitioning "
-                    f"(status={state.status}). Retry shortly."
+                    f"(status={state.status.value}). Retry shortly."
                 )
 
-            # Check that the requested backend is enabled
-            if model.backend not in self._backends:
+            if not self._registry.is_enabled(model.backend):
                 raise RuntimeError(
-                    f"Backend '{model.backend}' is not enabled in the current "
-                    "configuration."
+                    f"Backend '{model.backend.value}' is not enabled in the "
+                    "current configuration."
                 )
 
-            # Free enough VRAM for the new model
             await self._evict_for(self._total_vram_mb(model))
-
-            # Load the model
-            port = await self._load(model)
-            return port
+            return await self._load(model)
 
     async def unload(self, model_name: str) -> None:
         """Explicitly unload a model by name."""
@@ -172,53 +135,45 @@ class VRAMManager:
             await self._unload_by_name(model_name)
 
     async def get_port(self, model_name: str) -> Optional[int]:
-        """Return the port for a loaded model, or None if not loaded."""
+        """Return the port of a loaded model, or ``None`` if not loaded."""
         state = await self._state.get(model_name)
         if state is not None and state.status == ModelStatus.loaded:
             return state.port
         return None
 
-    def get_backend(self, backend_type: BackendType) -> Backend | None:
-        """Return the backend instance for *backend_type*, or None."""
-        return self._backends.get(backend_type)
+    def get_instance(self, model_name: str) -> Optional[Backend]:
+        """Return the live backend instance for *model_name*, if loaded."""
+        return self._instances.get(model_name)
 
     # ------------------------------------------------------------------
-    # Internal helpers (must be called with self._lock held)
+    # Internals (must be called with self._lock held)
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _total_vram_mb(model: ModelConfig) -> int:
+        return model.vram_mb + (model.draft_model_vram_mb or 0)
 
     async def _free_vram(self) -> int:
-        """Return estimated free VRAM in MB."""
         used = await self._state.total_loaded_vram()
         return max(0, self._settings.total_vram_mb - used)
 
     async def _evict_for(self, required_mb: int) -> None:
-        """
-        Evict loaded models in LIFO order until *required_mb* VRAM is free.
+        """Evict loaded models LIFO until *required_mb* is free.
 
-        Models with active in-flight inference requests are never evicted to
-        avoid interrupting an ongoing generation.
+        Models with in-flight requests are never evicted.
         """
-        while True:
+        while await self._free_vram() < required_mb:
             free = await self._free_vram()
-            if free >= required_mb:
-                return
-
-            # Find the most-recently loaded model (highest load_order) to evict,
-            # but skip any model that currently has active inference requests.
-            loaded_models = await self._state.get_loaded()
-            evictable = [m for m in loaded_models if get_active_count(m.name) == 0]
-
+            loaded = await self._state.get_loaded()
+            evictable = [m for m in loaded if self.active_count(m.name) == 0]
             if not evictable:
-                active_names = [
-                    m.name for m in loaded_models if get_active_count(m.name) > 0
-                ]
+                busy = [m.name for m in loaded if self.active_count(m.name) > 0]
                 raise RuntimeError(
-                    f"Not enough VRAM: need {required_mb} MB but only "
-                    f"{free} MB free. All loaded models have active requests "
-                    f"and cannot be evicted: {active_names}"
+                    f"Not enough VRAM: need {required_mb} MB but only {free} MB "
+                    f"free. All loaded models have active requests and cannot "
+                    f"be evicted: {busy}"
                 )
 
-            # LIFO: evict the most recently loaded evictable model
             victim = max(evictable, key=lambda m: m.load_order)
             logger.info(
                 "VRAM pressure: evicting model '%s' (%d MB) to free space for "
@@ -231,44 +186,40 @@ class VRAMManager:
             await self._unload_by_name(victim.name)
 
     async def _load(self, model: ModelConfig) -> int:
-        """Load a model and return its port."""
-        backend = self._backends[model.backend]
+        backend = self._registry.create(model.backend)
         port = await self._ports.allocate()
         load_order = await self._state.next_load_order()
-
         await self._state.set_loading(
             model.name, model.backend.value, self._total_vram_mb(model)
         )
 
         try:
-            pid = await backend.start(model, port)
+            await backend.start(model, port)
         except Exception as exc:
             await self._state.set_error(model.name)
             raise RuntimeError(
                 f"Failed to start backend for '{model.name}': {exc}"
             ) from exc
 
-        ready_timeout = 300.0 if model.model_type == ModelType.transcription else 60.0
-        ready = await backend.is_ready(
-            port, model.name, timeout=ready_timeout, model_type=model.model_type.value
+        timeout = (
+            _READY_TIMEOUT_TRANSCRIPTION
+            if model.model_type == ModelType.transcription
+            else _READY_TIMEOUT
         )
-        if not ready:
-            # Kill the stalled process
-            try:
-                await backend.stop(pid)
-            except Exception:
-                pass
+        if not await backend.is_ready(port, model, timeout):
+            await backend.stop()
             await self._state.set_error(model.name)
             raise RuntimeError(
                 f"Backend for model '{model.name}' did not become ready."
             )
 
-        await self._state.set_loaded(model.name, pid, port, load_order)
+        self._instances[model.name] = backend
+        await self._state.set_loaded(model.name, backend.pid or 0, port, load_order)
         logger.info(
-            "Model '%s' loaded on port %d (PID %d, VRAM %d MB%s)",
+            "Model '%s' loaded on port %d (PID %s, VRAM %d MB%s)",
             model.name,
             port,
-            pid,
+            backend.pid,
             self._total_vram_mb(model),
             f" + {model.draft_model_vram_mb} MB draft"
             if model.draft_model_vram_mb
@@ -277,24 +228,17 @@ class VRAMManager:
         return port
 
     async def _unload_by_name(self, model_name: str) -> None:
-        """Unload a single model by name (lock must already be held)."""
         state = await self._state.get(model_name)
         if state is None or state.status != ModelStatus.loaded:
             return
 
         await self._state.set_unloading(model_name)
-        backend = self._backends.get(BackendType(state.backend))
-
-        if backend is not None and state.pid is not None:
+        backend = self._instances.pop(model_name, None)
+        if backend is not None:
             try:
-                await backend.stop(state.pid)
+                await backend.stop()
             except Exception as exc:
-                logger.warning(
-                    "Error stopping backend for '%s' (PID %d): %s",
-                    model_name,
-                    state.pid,
-                    exc,
-                )
+                logger.warning("Error stopping backend for '%s': %s", model_name, exc)
 
         await self._state.set_unloaded(model_name)
         logger.info("Model '%s' unloaded", model_name)

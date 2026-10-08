@@ -1,17 +1,17 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from dynllm.backends.transformers import TransformersBackend
 from dynllm.core.config import BackendType, ModelConfig, ModelType
 
-
-import shutil
-
 _TRANSFORMERS_BIN = shutil.which("transformers") or "transformers"
 
 
-def test_transformers_command_uses_local_model_path_and_runtime_flags() -> None:
+def test_transformers_command_uses_local_model_path_and_runtime_flags(
+    tmp_path: Path,
+) -> None:
     backend = TransformersBackend(binary="transformers")
     model = ModelConfig(
         name="qwen25-3b-hf",
@@ -23,7 +23,7 @@ def test_transformers_command_uses_local_model_path_and_runtime_flags() -> None:
         vram_mb=6500,
     )
 
-    cmd = backend._build_command(model, 9101)
+    cmd = backend._build_command(model, 9101, tmp_path)
 
     assert cmd == [
         _TRANSFORMERS_BIN,
@@ -40,7 +40,9 @@ def test_transformers_command_uses_local_model_path_and_runtime_flags() -> None:
     ]
 
 
-def test_transformers_command_includes_quantization_and_optional_runtime_flags() -> None:
+def test_transformers_command_includes_quantization_and_optional_runtime_flags(
+    tmp_path: Path,
+) -> None:
     backend = TransformersBackend(binary="transformers")
     model = ModelConfig(
         name="qwen25-3b-bnb4",
@@ -59,7 +61,7 @@ def test_transformers_command_includes_quantization_and_optional_runtime_flags()
         vram_mb=4200,
     )
 
-    cmd = backend._build_command(model, 9102)
+    cmd = backend._build_command(model, 9102, tmp_path)
 
     assert cmd == [
         _TRANSFORMERS_BIN,
@@ -85,7 +87,7 @@ def test_transformers_command_includes_quantization_and_optional_runtime_flags()
     ]
 
 
-def test_transformers_command_for_speech_model() -> None:
+def test_transformers_command_for_speech_model(tmp_path: Path) -> None:
     backend = TransformersBackend(binary="transformers")
     model = ModelConfig(
         name="speecht5-hf",
@@ -97,7 +99,7 @@ def test_transformers_command_for_speech_model() -> None:
         vram_mb=2000,
     )
 
-    cmd = backend._build_command(model, 9103)
+    cmd = backend._build_command(model, 9103, tmp_path)
 
     assert cmd == [
         _TRANSFORMERS_BIN,
@@ -112,3 +114,17 @@ def test_transformers_command_for_speech_model() -> None:
         "--dtype",
         "float32",
     ]
+
+
+def test_transformers_validate_rejects_missing_path(tmp_path: Path) -> None:
+    backend = TransformersBackend(binary="transformers")
+    model = ModelConfig(
+        name="ghost",
+        path=tmp_path / "ghost",
+        backend=BackendType.transformers,
+        vram_mb=1,
+    )
+    import pytest
+
+    with pytest.raises(RuntimeError, match="Model path not found"):
+        backend._validate(model)

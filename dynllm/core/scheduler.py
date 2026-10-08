@@ -25,8 +25,6 @@ if TYPE_CHECKING:
     from dynllm.core.vram_manager import VRAMManager
     from dynllm.db.manager import StateManager
 
-from dynllm.core.vram_manager import get_active_count
-
 logger = logging.getLogger(__name__)
 
 # How often (in seconds) the scheduler wakes up and checks idle models.
@@ -119,7 +117,7 @@ class IdleScheduler:
             idle_seconds = (now - last_used).total_seconds()
             if idle_seconds >= effective_timeout:
                 # Do not evict a model that is currently serving a request.
-                if get_active_count(model_state.name) > 0:
+                if self._vram.active_count(model_state.name) > 0:
                     logger.debug(
                         "Skipping auto-unload of '%s': has active requests",
                         model_state.name,

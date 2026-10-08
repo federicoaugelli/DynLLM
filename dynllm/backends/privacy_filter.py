@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
-from dynllm.backends.base import Backend
+from dynllm.backends.base import InProcessBackend
+from dynllm.backends.gpu import empty_torch_cache
 from dynllm.core.config import BackendType, ModelConfig
 
 logger = logging.getLogger(__name__)
@@ -21,46 +24,39 @@ MASK_TAGS: dict[str, str] = {
 }
 
 
-class PrivacyFilterBackend(Backend):
-    """
-    In-process privacy-filter backend.
+class PrivacyFilterBackend(InProcessBackend):
+    """In-process PII masking backend.
 
-    Loads ``openai/privacy-filter`` (or a local copy) via the Hugging Face
-    ``token-classification`` pipeline inside the proxy process.  All inference
-    runs in a dedicated thread-pool executor to keep the event loop responsive.
+    Loads ``openai/privacy-filter`` (or a local copy) through the Hugging Face
+    ``token-classification`` pipeline.  All inference runs in a dedicated
+    thread-pool executor.
     """
 
     def __init__(self) -> None:
-        self._pipeline = None  # transformers pipeline
-        self._pid: int = 0
-        self._executor = ThreadPoolExecutor(
-            max_workers=1,
-            thread_name_prefix="privacy",
-        )
-
-    # ------------------------------------------------------------------
-    # Backend ABC
-    # ------------------------------------------------------------------
+        self._pipeline: Any | None = None
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="privacy")
 
     @property
     def backend_type(self) -> BackendType:
         return BackendType.privacy_filter
 
-    async def start(self, model: ModelConfig, port: int) -> int:
+    @property
+    def loaded(self) -> bool:
+        return self._pipeline is not None
+
+    async def _load(self, model: ModelConfig) -> None:
         try:
             from transformers import pipeline
-        except ImportError:
+        except ImportError as exc:
             raise RuntimeError(
                 "The 'transformers' package is required for the privacy_filter "
                 "backend. Install it with: uv pip install transformers torch"
-            )
+            ) from exc
 
         model_path = str(model.path)
-
-        loop = asyncio.get_running_loop()
         logger.info("Loading privacy filter model '%s' …", model_path)
 
-        def _load() -> None:
+        def _load_sync() -> None:
             self._pipeline = pipeline(
                 "token-classification",
                 model=model_path,
@@ -69,57 +65,23 @@ class PrivacyFilterBackend(Backend):
             self._pipeline.model.eval()
 
         try:
-            await loop.run_in_executor(self._executor, _load)
+            await self._run(_load_sync)
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to load privacy filter model '{model_path}': {exc}"
             ) from exc
-
-        self._pid = id(self._pipeline)
         logger.info("Privacy filter model '%s' loaded successfully", model.name)
-        return self._pid
 
-    async def stop(self, pid: int) -> None:
+    async def _unload(self) -> None:
         if self._pipeline is None:
             return
         logger.info("Unloading privacy filter model …")
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self._executor, self._unload_sync)
-
-    def _unload_sync(self) -> None:
-        """Synchronous GPU cleanup – runs in thread pool."""
-        del self._pipeline
         self._pipeline = None
-
-        import gc
-
-        gc.collect()
-
-        try:
-            import torch
-
-            if hasattr(torch, "xpu") and torch.xpu.is_available():
-                torch.xpu.empty_cache()
-                logger.debug("XPU cache emptied")
-            elif hasattr(torch, "cuda") and torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                logger.debug("CUDA cache emptied")
-        except Exception:
-            logger.debug("GPU cache cleanup skipped (best-effort)", exc_info=True)
-
+        await self._run(empty_torch_cache)
         logger.info("Privacy filter model unloaded")
 
-    async def is_ready(
-        self,
-        port: int,
-        model_name: str = "",
-        timeout: float = 60.0,
-        model_type: str = "llm",
-    ) -> bool:
-        return self._pipeline is not None
-
     # ------------------------------------------------------------------
-    # Public inference API
+    # Inference
     # ------------------------------------------------------------------
 
     async def filter_text(
@@ -129,84 +91,60 @@ class PrivacyFilterBackend(Backend):
         mask_strategy: str = "replace",
         categories: list[str] | None = None,
     ) -> dict:
-        """
-        Detect and optionally mask PII spans in *text*.
+        """Detect and mask PII spans in *text*.
 
-        Parameters
-        ----------
-        text:
-            Input text to scan for PII.
-        mask_strategy:
-            ``"replace"`` – substitute with a category-specific tag (``[EMAIL]`` …).
-            ``"redact"``  – substitute with ``[REDACTED]``.
-            ``"hash"``    – substitute with ``[REDACTED_<hash>]``.
-        categories:
-            If given, only report / mask spans whose ``entity_group`` is in this
-            list.  ``None`` means all categories.
-
-        Returns
-        -------
-        A dict with keys ``masked_text`` (str) and ``spans`` (list[dict]).
+        ``mask_strategy`` is one of ``replace`` (category tag), ``redact``
+        (``[REDACTED]``) or ``hash`` (``[REDACTED_<hash>]``).  ``categories``
+        limits masking to the given ``entity_group`` values.
         """
         if self._pipeline is None:
             raise RuntimeError("Privacy filter model not loaded")
 
-        loop = asyncio.get_running_loop()
-        raw_spans = await loop.run_in_executor(
-            self._executor,
-            self._classify_sync,
-            text,
-        )
-
+        spans = await self._run(self._classify_sync, text)
         if categories:
-            categories_set = set(categories)
-            raw_spans = [s for s in raw_spans if s["entity_group"] in categories_set]
-
-        masked_text = self._apply_mask(text, raw_spans, mask_strategy)
+            allowed = set(categories)
+            spans = [s for s in spans if s["entity_group"] in allowed]
 
         return {
-            "masked_text": masked_text,
-            "spans": raw_spans,
+            "masked_text": self._apply_mask(text, spans, mask_strategy),
+            "spans": spans,
         }
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Internals
     # ------------------------------------------------------------------
 
+    async def _run(self, fn, *args):
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._executor, lambda: fn(*args))
+
     def _classify_sync(self, text: str) -> list[dict]:
-        """Run the HF pipeline (blocking – call from executor)."""
         results = self._pipeline(text, aggregation_strategy="simple")
-        spans: list[dict] = []
-        for r in results:
-            spans.append(
-                {
-                    "entity_group": r["entity_group"],
-                    "score": round(float(r["score"]), 6),
-                    "word": r["word"],
-                    "start": int(r["start"]),
-                    "end": int(r["end"]),
-                }
-            )
-        return spans
+        return [
+            {
+                "entity_group": r["entity_group"],
+                "score": round(float(r["score"]), 6),
+                "word": r["word"],
+                "start": int(r["start"]),
+                "end": int(r["end"]),
+            }
+            for r in results
+        ]
 
     def _apply_mask(self, text: str, spans: list[dict], strategy: str) -> str:
-        """Replace detected PII spans with the chosen mask token."""
         if not spans:
             return text
-
-        sorted_spans = sorted(spans, key=lambda s: s["start"], reverse=True)
         masked = text
-        for span in sorted_spans:
+        for span in sorted(spans, key=lambda s: s["start"], reverse=True):
             tag = self._mask_tag(span["entity_group"], strategy)
             masked = masked[: span["start"]] + tag + masked[span["end"] :]
         return masked
 
-    def _mask_tag(self, entity_group: str, strategy: str) -> str:
+    @staticmethod
+    def _mask_tag(entity_group: str, strategy: str) -> str:
         if strategy == "redact":
             return "[REDACTED]"
         if strategy == "hash":
-            import hashlib
-
-            h = hashlib.sha256(entity_group.encode()).hexdigest()[:8]
-            return f"[REDACTED_{h}]"
+            digest = hashlib.sha256(entity_group.encode()).hexdigest()[:8]
+            return f"[REDACTED_{digest}]"
         return MASK_TAGS.get(entity_group, "[PII]")

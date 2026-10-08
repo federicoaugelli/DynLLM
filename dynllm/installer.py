@@ -42,7 +42,7 @@ _INSTALL_HINTS: dict[BackendType, str] = {
     BackendType.transformers: (
         "transformers CLI not found on PATH.\n"
         "  Install the serving extras into your DynLLM environment:\n"
-        "    uv pip install \"transformers[serving]\"\n"
+        '    uv pip install "transformers[serving]"\n'
         "  For Intel GPUs, install torch with XPU wheels first:\n"
         "    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu\n"
         "  Then set 'backend.transformers_binary' if the CLI is outside PATH."
@@ -108,7 +108,9 @@ def check_backends(settings: Settings) -> None:
                 import transformers  # noqa: F401
                 import torch  # noqa: F401
 
-                logger.info("Backend 'privacy_filter' packages found: transformers, torch")
+                logger.info(
+                    "Backend 'privacy_filter' packages found: transformers, torch"
+                )
             except ImportError as exc:
                 hint = _INSTALL_HINTS.get(backend_type, "")
                 logger.warning(
