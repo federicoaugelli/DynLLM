@@ -121,6 +121,22 @@ class ImageGenerationRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# System One decision models (/v1/systemone)
+# ---------------------------------------------------------------------------
+
+# TypeSafe Jev / Cloudflare Clef format. The scoring rules and question
+# validation live in the backend (llama-server); DynLLM only reads `model`.
+
+
+class SystemOneRequest(BaseModel):
+    model: str
+    state: Union[str, list[Any], dict[str, Any]]
+    questions: dict[str, Any]
+
+    model_config = {"extra": "allow"}
+
+
+# ---------------------------------------------------------------------------
 # Embeddings (/v1/embeddings)
 # ---------------------------------------------------------------------------
 

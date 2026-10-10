@@ -28,6 +28,7 @@ class BackendType(str, Enum):
 
 class ModelType(str, Enum):
     llm = "llm"
+    decision = "decision"
     transcription = "transcription"
     speech = "speech"
     embedding = "embedding"
@@ -56,7 +57,12 @@ class TransformersAttentionImplementation(str, Enum):
 
 # Which model types each backend can serve (order is used in error messages).
 _SUPPORTED_MODEL_TYPES: dict[BackendType, tuple[ModelType, ...]] = {
-    BackendType.llamacpp: (ModelType.llm, ModelType.embedding, ModelType.rerank),
+    BackendType.llamacpp: (
+        ModelType.llm,
+        ModelType.decision,
+        ModelType.embedding,
+        ModelType.rerank,
+    ),
     BackendType.openvino: (
         ModelType.llm,
         ModelType.transcription,
@@ -125,6 +131,21 @@ class ModelConfig(BaseModel):
 
     context_size: int = 4096
     """Context window size. llama.cpp only."""
+
+    mmproj: Optional[Path] = None
+    """
+    Path to a multimodal projector GGUF. llama.cpp only.
+
+    Required for decision models that read images/audio (e.g. Clef).  Passed to
+    llama-server as ``--mmproj``.
+    """
+
+    extra_args: list[str] = Field(default_factory=list)
+    """
+    Additional raw arguments appended to the llama-server command. llama.cpp
+    only.  Useful for flags DynLLM does not model explicitly (e.g.
+    ``["--batch-size", "2048"]``).
+    """
 
     # --- OVMS specific ---
     ovms_shape: Optional[str] = None
@@ -246,6 +267,15 @@ class ModelConfig(BaseModel):
             return None
         return Path(str(v)).expanduser()
 
+    @field_validator("mmproj", mode="before")
+    @classmethod
+    def expand_mmproj_path(cls, v: object) -> Optional[Path]:
+        if v is None:
+            return None
+        if isinstance(v, str) and not v.strip():
+            return None
+        return Path(str(v)).expanduser()
+
     @field_validator("target_device")
     @classmethod
     def normalize_target_device(cls, v: str) -> str:
@@ -333,6 +363,12 @@ class ModelConfig(BaseModel):
         elif self.draft_model_vram_mb is not None and self.draft_model is None:
             raise ValueError("draft_model_vram_mb requires draft_model to be set")
 
+        if self.backend != BackendType.llamacpp:
+            if self.mmproj is not None:
+                raise ValueError("mmproj is only supported for backend=llamacpp")
+            if self.extra_args:
+                raise ValueError("extra_args is only supported for backend=llamacpp")
+
         if self.quantization != TransformersQuantization.none:
             if (
                 self.backend != BackendType.transformers
@@ -407,6 +443,8 @@ class Settings(BaseModel):
             for model in self.models:
                 if not model.path.is_absolute():
                     model.path = base / model.path
+                if model.mmproj is not None and not model.mmproj.is_absolute():
+                    model.mmproj = base / model.mmproj
         return self
 
     @field_validator("db_path", mode="before")

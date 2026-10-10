@@ -11,6 +11,7 @@ Inference endpoints:
   POST /v1/images/generations
   POST /v1/embeddings
   POST /v1/rerank
+  POST /v1/systemone
   GET  /v2/models/{name}            – KServe metadata
   GET  /v2/models/{name}/ready      – KServe readiness
   POST /v2/models/{name}/infer      – KServe inference
@@ -45,6 +46,7 @@ from dynllm.api.schemas import (
     ModelsResponse,
     RerankRequest,
     SpeechRequest,
+    SystemOneRequest,
     UnloadRequest,
 )
 from dynllm.backends.privacy_filter import PrivacyFilterBackend
@@ -475,6 +477,31 @@ async def rerank(
         state=state,
         vram=vram,
         path="v1/rerank",
+    )
+
+
+# ---------------------------------------------------------------------------
+# System One decision models (/v1/systemone)
+# ---------------------------------------------------------------------------
+
+
+@router.post("/v1/systemone")
+async def systemone(
+    request: Request,
+    body: SystemOneRequest,
+    settings: Settings = Depends(get_settings),
+    vram: VRAMManager = Depends(get_vram),
+    state: StateManager = Depends(get_state),
+) -> Response:
+    model_cfg = _require_model(
+        settings, body.model, expected_types={ModelType.decision}
+    )
+    return await _proxy_model_request(
+        request,
+        model_cfg=model_cfg,
+        state=state,
+        vram=vram,
+        path=f"{_api_version(model_cfg)}/systemone",
     )
 
 

@@ -78,7 +78,7 @@ log_level: "info"   # debug | info | warning | error
 #   name         – unique ID used in API requests (model field)
 #   path         – file (.gguf) or directory (OpenVINO IR) on disk
 #   backend      – "llamacpp", "openvino", "transformers", or "tts"
-#   model_type   – "llm", "transcription", "speech",
+#   model_type   – "llm", "decision", "transcription", "speech",
 #                  "embedding", "rerank", "classification",
 #                  "detection", "segmentation", "ocr",
 #                  "image_generation"
@@ -88,6 +88,10 @@ log_level: "info"   # debug | info | warning | error
 # llama.cpp extra fields:
 #   n_gpu_layers  – layers to offload to GPU (-1 = all)
 #   context_size  – context window size
+#   mmproj        – path to a multimodal projector GGUF (--mmproj); needed by
+#                   vision/audio decision models such as Clef
+#   extra_args    – extra raw llama-server arguments (list), e.g.
+#                   ["--batch-size", "2048"]
 #
 # OpenVINO extra fields:
 #   ovms_shape    – optional shape hint (e.g. "auto")
@@ -159,6 +163,23 @@ models:
     n_gpu_layers: -1
     context_size: 8192
     # unload_time: -1      # never auto-unload
+
+  # --- Decision model (llama.cpp, System One / JEV-compatible) ---
+  # Served via POST /v1/systemone. Requires a llama.cpp build with decision
+  # model support (PR #29818, merged 2026-10-02) and a decision-model GGUF.
+  # Use an official ggml-org GGUF (e.g. ggml-org/Clef-GGUF) — some community
+  # conversions (e.g. bartowski) lack the custom `clef` architecture.
+  # `mmproj` is only needed for multimodal decision models that read images.
+  # Note: many candidates/large states may need a bigger --batch-size.
+  - name: "clef"
+    path: "/mnt/models/gguf/Clef.Q4_K_M.gguf"
+    backend: llamacpp
+    model_type: decision
+    vram_mb: 16000
+    n_gpu_layers: -1
+    context_size: 16384
+    # mmproj: "/mnt/models/gguf/Clef-mmproj-f16.gguf"
+    extra_args: ["--batch-size", "2048"]
 
   # --- OpenVINO (IR) examples ---
   - name: "phi3-mini-ov"

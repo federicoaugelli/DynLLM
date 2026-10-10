@@ -40,6 +40,8 @@ class LlamaCppBackend(SubprocessBackend):
     def _validate(self, model: ModelConfig) -> None:
         if not Path(model.path).exists():
             raise RuntimeError(f"Model file not found: {model.path}")
+        if model.mmproj is not None and not Path(model.mmproj).exists():
+            raise RuntimeError(f"Multimodal projector file not found: {model.mmproj}")
 
     def _build_command(self, model: ModelConfig, port: int, workdir: Path) -> list[str]:
         cmd = [
@@ -59,10 +61,15 @@ class LlamaCppBackend(SubprocessBackend):
             "--log-disable",
         ]
 
+        if model.mmproj is not None:
+            cmd.extend(["--mmproj", str(model.mmproj)])
+
         if model.model_type == ModelType.embedding:
             cmd.extend(["--embedding", "--pooling", "mean"])
         elif model.model_type == ModelType.rerank:
             cmd.extend(["--reranking"])
+
+        cmd.extend(model.extra_args)
 
         return cmd
 

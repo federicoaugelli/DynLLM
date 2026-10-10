@@ -12,7 +12,7 @@ after a configurable timeout.
 
 ## Features
 
-- **OpenAI-compatible API** – `/v1/chat/completions`, `/v1/completions`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/rerank`, `/v1/models`
+- **OpenAI-compatible API** – `/v1/chat/completions`, `/v1/completions`, `/v1/audio/transcriptions`, `/v1/audio/translations`, `/v1/audio/speech`, `/v1/images/generations`, `/v1/embeddings`, `/v1/rerank`, `/v1/systemone`, `/v1/models`
 - **litellm guardrail API** – `/beta/litellm_basic_guardrail_api` for PII masking via the in-process privacy filter
 - **Dynamic loading** – models are started on first request and stopped when idle
 - **VRAM budgeting** – LIFO eviction keeps total GPU memory within a configured limit
@@ -98,11 +98,13 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `name` | yes | Unique model ID; used as the `model` field in API requests |
 | `path` | yes | Path to the `.gguf` file, OpenVINO IR directory, or local Hugging Face model directory |
 | `backend` | yes | `llamacpp`, `openvino`, `transformers`, `tts`, `privacy_filter`, or `neutronstar` |
-| `model_type` | no | `llm`, `transcription`, `speech`, `image_generation`, `embedding`, `rerank`, `classification`, `detection`, `segmentation`, `ocr`. Default: `llm`. Note: `speech` is served by `backend: tts` or `transformers` (not OpenVINO); `classification` is reserved for `backend: privacy_filter` |
+| `model_type` | no | `llm`, `decision`, `transcription`, `speech`, `image_generation`, `embedding`, `rerank`, `classification`, `detection`, `segmentation`, `ocr`. Default: `llm`. Note: `decision` (System One / JEV-compatible) is served by `backend: llamacpp`; `speech` is served by `backend: tts` or `transformers` (not OpenVINO); `classification` is reserved for `backend: privacy_filter` |
 | `vram_mb` | yes | Estimated VRAM in MB when loaded (used for eviction math) |
 | `target_device` | no | OpenVINO target device (`CPU`, `GPU`, `NPU`). Default: `CPU` |
 | `n_gpu_layers` | no | llama.cpp only – GPU layers (`-1` = all). Default: `-1` |
 | `context_size` | no | llama.cpp only – context window size. Default: `4096` |
+| `mmproj` | no | llama.cpp only – path to a multimodal projector GGUF (`--mmproj`); needed for vision/audio decision models such as Clef |
+| `extra_args` | no | llama.cpp only – extra raw `llama-server` arguments as a list (e.g. `["--batch-size", "2048"]`) |
 | `ovms_shape` | no | OpenVINO only – shape hint (e.g. `"auto"`) |
 | `device` | no | transformers only – execution device (`auto`, `cpu`, `cuda`, `xpu`) |
 | `dtype` | no | transformers only – load dtype (`auto`, `float16`, `bfloat16`, `float32`) |
@@ -322,6 +324,29 @@ curl http://localhost:8000/v1/rerank \
   -d '{"model":"bge-reranker-v2-gguf","query":"what is AI?","documents":["AI is...","ML is..."]}'
 ```
 
+### `POST /v1/systemone`
+
+System One decision-model endpoint (JEV-compatible), served by llama.cpp for models with `model_type: decision`. The request sends a `state` and typed `questions`; the backend returns a probability per option in a single scoring pass (no generated tokens).
+
+```bash
+curl http://localhost:8000/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "clef",
+    "state": "Customer message: I was charged twice and nobody replied.",
+    "questions": {
+      "route": {
+        "type": "choice",
+        "instructions": "Which team should handle this?",
+        "criteria": {"billing": "payments, refunds", "shipping": "delivery"}
+      },
+      "angry": {"type": "noul", "instructions": "Is the customer angry?"}
+    }
+  }'
+```
+
+Requires a llama.cpp build with decision-model support (PR #29818, merged 2026-10-02) and a decision-model GGUF. Use official `ggml-org` GGUFs (e.g. `ggml-org/Clef-GGUF`); some community conversions lack the custom `clef` architecture. Add `mmproj` for multimodal models that read images, and raise `--batch-size` via `extra_args` for many candidates.
+
 ### `POST /beta/litellm_basic_guardrail_api`
 
 litellm [Generic Guardrail API](https://docs.litellm.ai/docs/proxy/guardrails) contract for PII masking. It accepts texts and returns masked versions through the in-process `privacy_filter` backend. Configure it as a litellm guardrail:
@@ -379,7 +404,7 @@ curl -X POST http://localhost:8000/admin/models/unload \
 
 ### Load on demand
 
-When a request arrives for any configured endpoint (`/v1/chat/completions`, `/v1/completions`, `/v1/audio/*`, `/v1/images/generations`, `/v1/embeddings`, `/v1/rerank`, `/v2/models/*`):
+When a request arrives for any configured endpoint (`/v1/chat/completions`, `/v1/completions`, `/v1/audio/*`, `/v1/images/generations`, `/v1/embeddings`, `/v1/rerank`, `/v1/systemone`, `/v2/models/*`):
 1. DynLLM looks up the model in the config by name.
 2. If not loaded: checks whether enough VRAM is free.
 3. If not enough VRAM: evicts models in **LIFO order** (most recently loaded first),
@@ -457,7 +482,9 @@ lines in `systemd/dynllm.service`.
 - Serves **GGUF** models only.
 - One `llama-server` process per loaded model.
 - Readiness is detected via `GET /health`.
-- Relevant config fields: `n_gpu_layers`, `context_size`.
+- Supported `model_type`: `llm`, `decision`, `embedding`, `rerank`.
+- `decision` models (System One / JEV-compatible) are exposed at `/v1/systemone`. Requires a llama.cpp build with decision-model support (PR #29818+) and a decision-model GGUF (e.g. `ggml-org/Clef-GGUF`).
+- Relevant config fields: `n_gpu_layers`, `context_size`, `mmproj`, `extra_args`.
 
 ### OpenVINO Model Server (OVMS)
 
