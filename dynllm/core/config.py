@@ -142,9 +142,9 @@ class ModelConfig(BaseModel):
 
     extra_args: list[str] = Field(default_factory=list)
     """
-    Additional raw arguments appended to the llama-server command. llama.cpp
-    only.  Useful for flags DynLLM does not model explicitly (e.g.
-    ``["--batch-size", "2048"]``).
+    Additional raw arguments appended to the backend server command.
+    llama.cpp and NeutronStar only.  Useful for flags DynLLM does not model
+    explicitly (e.g. ``["--batch-size", "2048"]``).
     """
 
     # --- OVMS specific ---
@@ -184,6 +184,13 @@ class ModelConfig(BaseModel):
     # --- TTS engine specific ---
     tts_engine: str = ""
     """TTS engine name ('qwen', 'supertonic'). Required when backend=tts."""
+
+    # --- NeutronStar specific ---
+    ns_max_seq: Optional[int] = Field(default=None, gt=0)
+    """KV capacity passed to ns-server as ``--max-seq`` (server default: 16384)."""
+
+    ns_env: dict[str, str] = Field(default_factory=dict)
+    """``NS3_*`` tuning variables exported to the ns-server subprocess."""
 
     # --- OpenVINO LLM tool calling / reasoning ---
     tool_parser: Optional[str] = None
@@ -366,8 +373,20 @@ class ModelConfig(BaseModel):
         if self.backend != BackendType.llamacpp:
             if self.mmproj is not None:
                 raise ValueError("mmproj is only supported for backend=llamacpp")
+
+        if self.backend not in (BackendType.llamacpp, BackendType.neutronstar):
             if self.extra_args:
-                raise ValueError("extra_args is only supported for backend=llamacpp")
+                raise ValueError(
+                    "extra_args is only supported for backend=llamacpp and "
+                    "backend=neutronstar"
+                )
+
+        if self.backend != BackendType.neutronstar and (
+            self.ns_max_seq is not None or self.ns_env
+        ):
+            raise ValueError(
+                "ns_max_seq and ns_env are only supported for backend=neutronstar"
+            )
 
         if self.quantization != TransformersQuantization.none:
             if (

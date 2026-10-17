@@ -34,13 +34,13 @@ enabled_backends:
   - openvino           # serves OpenVINO IR models via OVMS
   # - tts             # in-process TTS engines (Qwen, Supertonic, …)
   # - privacy_filter  # in-process PII masking via openai/privacy-filter (HF)
-  # - neutronstar     # scaffold for NeutronStar ns-server (not yet functional)
+  # - neutronstar     # serves merged MoE GGUFs via NeutronStar ns-server (Intel Arc)
 
 # Backend binary configuration
 backend:
   llamacpp_binary: "llama-server"   # or /full/path/to/llama-server
   ovms_binary: "ovms"               # or /full/path/to/ovms
-  # neutronstar_binary: "ns-server" # scaffold, not yet functional
+  # neutronstar_binary: "ns-server"  # or /full/path/to/ns-server
   # Port range allocated to backend subprocesses (one port per loaded model)
   port_range_start: 9100
   port_range_end: 9200
@@ -92,6 +92,15 @@ log_level: "info"   # debug | info | warning | error
 #                   vision/audio decision models such as Clef
 #   extra_args    – extra raw llama-server arguments (list), e.g.
 #                   ["--batch-size", "2048"]
+#                   (also supported for backend: neutronstar)
+#
+# NeutronStar extra fields:
+#   ns_max_seq    – KV capacity passed to ns-server --max-seq
+#                   (server default: 16384)
+#   ns_env        – NS3_* tuning variables exported to the ns-server
+#                   subprocess (NS3_SPEC is rejected: the server aborts)
+#   extra_args    – extra raw ns-server arguments (list); ns-server exits on
+#                   unknown flags, so keep this minimal
 #
 # OpenVINO extra fields:
 #   ovms_shape    – optional shape hint (e.g. "auto")
@@ -286,15 +295,6 @@ models:
     n_gpu_layers: -1
     context_size: 4096
 
-  # --- CV model: classification (OpenVINO example) ---
-  # Accessible via KServe API: POST /v2/models/resnet50-vm/infer
-  - name: "resnet50-vm"
-    path: "/mnt/models/openvino/resnet-50-vm"
-    backend: openvino
-    model_type: classification
-    target_device: GPU
-    vram_mb: 200
-
   # --- CV model: object detection (OpenVINO example) ---
   # Accessible via KServe API: POST /v2/models/yolov8/infer
   - name: "yolov8"
@@ -371,3 +371,20 @@ models:
     model_type: embedding
     target_device: CPU
     vram_mb: 1000
+
+  # --- NeutronStar LLM (merged MoE GGUF, Intel Arc) ---
+  # Accessible via OpenAI /v1/chat/completions only (streaming + JSON).
+  # 'path' may be a model workspace dir (with model.json), a model.json, or a
+  # bare merged .gguf. ns-server is single-worker and takes nearly the whole
+  # GPU: set vram_mb to the full VRAM budget so other models are evicted first.
+  # Cold start (compile + stage) can take ~1 minute; the port binds only when
+  # the model is loaded.
+  - name: "minicpm-v4.7"
+    path: "/mnt/models/neutronstar/MiniCPM-V-4.7-35B-A3B"
+    backend: neutronstar
+    model_type: llm
+    vram_mb: 15000
+    # ns_max_seq: 16384                      # KV capacity (--max-seq)
+    # ns_env:                                # optional NS3_* tuning knobs
+    #   NS3_PREFIX_CACHE_BYTES: "8589934592"
+    # unload_time: 600

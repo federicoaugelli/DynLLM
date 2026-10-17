@@ -182,6 +182,18 @@ def _api_version(model_cfg: ModelConfig) -> str:
     return "v3" if model_cfg.backend == BackendType.openvino else "v1"
 
 
+def _reject_unsupported_endpoint(model_cfg: ModelConfig, endpoint: str) -> None:
+    """Fail fast on endpoints a backend does not expose (instead of a proxied 404)."""
+    if model_cfg.backend == BackendType.neutronstar:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Model '{model_cfg.name}' uses the neutronstar backend; its "
+                f"ns-server only exposes /v1/chat/completions, not {endpoint}."
+            ),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Model listing and text completions
 # ---------------------------------------------------------------------------
@@ -225,6 +237,7 @@ async def completions(
     state: StateManager = Depends(get_state),
 ) -> Response:
     model_cfg = _require_model(settings, body.model, expected_types={ModelType.llm})
+    _reject_unsupported_endpoint(model_cfg, "/v1/completions")
     return await _proxy_model_request(
         request,
         model_cfg=model_cfg,
@@ -451,6 +464,7 @@ async def embeddings(
     model_cfg = _require_model(
         settings, body.model, expected_types={ModelType.embedding, ModelType.llm}
     )
+    _reject_unsupported_endpoint(model_cfg, "/v1/embeddings")
     return await _proxy_model_request(
         request,
         model_cfg=model_cfg,
@@ -471,6 +485,7 @@ async def rerank(
     model_cfg = _require_model(
         settings, body.model, expected_types={ModelType.rerank, ModelType.llm}
     )
+    _reject_unsupported_endpoint(model_cfg, "/v1/rerank")
     return await _proxy_model_request(
         request,
         model_cfg=model_cfg,

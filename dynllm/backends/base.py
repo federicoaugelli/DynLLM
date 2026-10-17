@@ -43,6 +43,17 @@ class Backend(abc.ABC):
         """OS PID of the backing process, or ``None`` for in-process backends."""
         return None
 
+    @property
+    def ready_timeout_seconds(self) -> Optional[float]:
+        """
+        Readiness budget override for this backend, in seconds.
+
+        ``None`` lets the orchestrator pick the default for the model type.
+        Subprocess backends with very long cold starts (model compilation,
+        weight staging) override this to raise the budget.
+        """
+        return None
+
     @abc.abstractmethod
     async def start(self, model: ModelConfig, port: int) -> None:
         """Acquire the resource for *model* and bind it to *port*."""
@@ -72,6 +83,14 @@ class SubprocessBackend(Backend):
     @abc.abstractmethod
     def _build_command(self, model: ModelConfig, port: int, workdir: Path) -> list[str]:
         """Return the argv used to launch the backend for *model*."""
+
+    def _build_env(self, model: ModelConfig) -> Optional[dict[str, str]]:
+        """
+        Return the full environment for the child process, or ``None`` to
+        inherit DynLLM's environment untouched.  Override to inject backend
+        tuning variables on top of ``os.environ``.
+        """
+        return None
 
     @abc.abstractmethod
     async def is_ready(self, port: int, model: ModelConfig, timeout: float) -> bool:
@@ -103,6 +122,7 @@ class SubprocessBackend(Backend):
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=stderr_file,
+                env=self._build_env(model),
             )
 
         # Catch binaries that die immediately (bad flags, missing model, …).

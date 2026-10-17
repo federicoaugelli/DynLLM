@@ -16,7 +16,7 @@ after a configurable timeout.
 - **litellm guardrail API** – `/beta/litellm_basic_guardrail_api` for PII masking via the in-process privacy filter
 - **Dynamic loading** – models are started on first request and stopped when idle
 - **VRAM budgeting** – LIFO eviction keeps total GPU memory within a configured limit
-- **Multi-backend** – supports llama.cpp (GGUF), OpenVINO Model Server (IR), `transformers serve`, in-process TTS engines (Qwen3-TTS, Supertonic), the `privacy_filter` PII-masking backend, and a scaffolded NeutronStar (`ns-server`) backend
+- **Multi-backend** – supports llama.cpp (GGUF), OpenVINO Model Server (IR), `transformers serve`, in-process TTS engines (Qwen3-TTS, Supertonic), the `privacy_filter` PII-masking backend, and NeutronStar (`ns-server`, MoE inference for Intel Arc)
 - **Per-model idle timeout** – override the global timeout per model, or set `inf`/`-1` to never auto-unload
 - **Startup preloading** – specify models to load when DynLLM starts
 - **Safe mid-generation** – active inference requests are never interrupted by eviction
@@ -35,8 +35,8 @@ after a configurable timeout.
   - **TTS engines** (optional, `backend: tts`) – install the engine package plus `soundfile`
   - **Privacy filter** (optional, `backend: privacy_filter`) – needs `transformers` and `torch`
   - **NeutronStar** (optional, `backend: neutronstar`) – build `ns-server` from the NeutronStar
-    project. The integration is currently a **scaffold**: the backend type and config are wired
-    up, but launching `ns-server` is not implemented yet.
+    project (`cargo build --release --bin ns-server`, optionally `scripts/deploy.sh`); it needs
+    the OpenVINO runtime and Intel GPU compute-runtime on the host
 
 ---
 
@@ -87,7 +87,7 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `llamacpp_binary` | `llama-server` | Path or name of the llama-server binary |
 | `ovms_binary` | `ovms` | Path or name of the OVMS binary |
 | `transformers_binary` | `transformers` | Path or name of the Hugging Face transformers CLI |
-| `neutronstar_binary` | `ns-server` | Path or name of the NeutronStar `ns-server` binary (scaffold) |
+| `neutronstar_binary` | `ns-server` | Path or name of the NeutronStar `ns-server` binary |
 | `port_range_start` | `9100` | Start of port range for backend subprocesses |
 | `port_range_end` | `9200` | End of port range for backend subprocesses |
 
@@ -104,7 +104,7 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `n_gpu_layers` | no | llama.cpp only – GPU layers (`-1` = all). Default: `-1` |
 | `context_size` | no | llama.cpp only – context window size. Default: `4096` |
 | `mmproj` | no | llama.cpp only – path to a multimodal projector GGUF (`--mmproj`); needed for vision/audio decision models such as Clef |
-| `extra_args` | no | llama.cpp only – extra raw `llama-server` arguments as a list (e.g. `["--batch-size", "2048"]`) |
+| `extra_args` | no | llama.cpp / NeutronStar only – extra raw backend-server arguments as a list (e.g. `["--batch-size", "2048"]`) |
 | `ovms_shape` | no | OpenVINO only – shape hint (e.g. `"auto"`) |
 | `device` | no | transformers only – execution device (`auto`, `cpu`, `cuda`, `xpu`) |
 | `dtype` | no | transformers only – load dtype (`auto`, `float16`, `bfloat16`, `float32`) |
@@ -128,6 +128,8 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `max_num_batched_tokens` | no | openvino LLM only – max tokens per scheduler step |
 | `dynamic_split_fuse` | no | openvino LLM only – split prefill/decode across batches (default: enabled in OVMS) |
 | `model_distribution_policy` | no | openvino LLM only – `TENSOR_PARALLEL` or `PIPELINE_PARALLEL` for multi-device setups |
+| `ns_max_seq` | no | neutronstar only – KV capacity passed to `ns-server --max-seq` (server default: 16384) |
+| `ns_env` | no | neutronstar only – `NS3_*` tuning variables exported to the `ns-server` subprocess (e.g. `{NS3_MAX_SEQ: "8192"}`); `NS3_SPEC` is rejected |
 | `unload_time` | no | Per-model idle timeout (seconds). Overrides `idle_timeout_seconds`. Use `-1`, `inf`, `infinity`, or `never` to never auto-unload |
 
 ### Example config
@@ -541,11 +543,16 @@ uv pip install "transformers[serving]"
 - Quantization is enabled only for `model_type: llm` in DynLLM.
 - DynLLM still applies the same VRAM accounting, LIFO eviction, and idle unload rules used for llama.cpp and OVMS.
 
-### NeutronStar (scaffold)
+### NeutronStar
 
-- Reserved for NeutronStar `ns-server`, a custom MoE inference engine for Intel Arc GPUs.
-- **Scaffold only**: `backend: neutronstar` is validated and registered, but launching `ns-server` is not implemented yet (`start()` raises `NotImplementedError`). It is off by default and will be wired up once the server API is stable.
-- Expected shape once enabled: one `ns-server <merged.gguf> --alias <name>` process per model, readiness via `GET /health`, inference proxied to `POST /v1/chat/completions` (OpenAI-compatible, streaming and non-streaming).
+- Serves merged MoE GGUF models through `ns-server`, the NeutronStar inference engine for Intel Arc GPUs.
+- One `ns-server --model <path> --alias <name> --port <dynllm-allocated>` process per loaded model; `path` may be a model workspace directory (containing `model.json`), a `model.json` file, or a bare merged `.gguf`.
+- `ns-server` exposes only the OpenAI-compatible `POST /v1/chat/completions` (streaming SSE supported) and `GET /v1/models`; DynLLM rejects `/v1/completions`, `/v1/embeddings` and `/v1/rerank` for NeutronStar models with `400`.
+- The port is bound only after the whole model is compiled and staged (≈40–70 s cold), so DynLLM gives NeutronStar a 300 s readiness budget.
+- `ns-server` is a single-worker engine that consumes nearly the full GPU: set `vram_mb` high (e.g. the machine's VRAM budget) so LIFO eviction clears other models before it loads.
+- Relevant config fields: `ns_max_seq` (KV capacity, `--max-seq`), `ns_env` (`NS3_*` tuning variables exported to the subprocess), `extra_args`. `NS3_SPEC` is rejected — `ns-server` aborts when it is set.
+- The engine keeps a compile/prefix cache under `.cache/` relative to DynLLM's working directory; run the proxy from a stable directory (the shipped systemd unit does) to keep warm starts.
+- Thinking models split the answer into `content`/`reasoning_content`: a too-small `max_tokens` leaves `content` empty, so budget generously (≥2048).
 
 ---
 

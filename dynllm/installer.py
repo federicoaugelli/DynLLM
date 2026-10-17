@@ -53,6 +53,15 @@ _INSTALL_HINTS: dict[BackendType, str] = {
         "    uv pip install transformers torch\n"
         "  The model will be auto-downloaded from HuggingFace on first load."
     ),
+    BackendType.neutronstar: (
+        "ns-server not found on PATH.\n"
+        "  NeutronStar requires a hardware-tuned build; from the NeutronStar\n"
+        "  repo checkout:\n"
+        "    cargo build --release --bin ns-server\n"
+        "    sudo scripts/deploy.sh   # symlinks into /usr/local/bin\n"
+        "  Requires the OpenVINO runtime and Intel GPU compute-runtime.\n"
+        "  Or set 'backend.neutronstar_binary' in your config to the full path."
+    ),
 }
 
 
@@ -100,6 +109,7 @@ def check_backends(settings: Settings) -> None:
         BackendType.llamacpp: settings.backend.llamacpp_binary,
         BackendType.openvino: settings.backend.ovms_binary,
         BackendType.transformers: settings.backend.transformers_binary,
+        BackendType.neutronstar: settings.backend.neutronstar_binary,
     }
 
     for backend_type in settings.enabled_backends:

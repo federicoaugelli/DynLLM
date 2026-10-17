@@ -206,6 +206,8 @@ class VRAMManager:
             if model.model_type == ModelType.transcription
             else _READY_TIMEOUT
         )
+        if backend.ready_timeout_seconds is not None:
+            timeout = backend.ready_timeout_seconds
         if not await backend.is_ready(port, model, timeout):
             await backend.stop()
             await self._state.set_error(model.name)
