@@ -4,9 +4,9 @@ Agnostic OpenAI-compatible proxy for dynamic model loading and unloading.
 
 DynLLM sits between your OpenAI-compatible client (OpenWebUI, LangChain, curl, …) and
 your local inference backends (llama.cpp, OpenVINO Model Server, Hugging Face transformers,
-plus in-process TTS engines and a PII privacy filter). It automatically loads models on
-demand, tracks VRAM usage, evicts models when memory is tight, and unloads idle models
-after a configurable timeout.
+plus in-process TTS engines, a PII privacy filter and Laya decision models). It
+automatically loads models on demand, tracks VRAM usage, evicts models when memory is
+tight, and unloads idle models after a configurable timeout.
 
 ---
 
@@ -16,7 +16,8 @@ after a configurable timeout.
 - **litellm guardrail API** – `/beta/litellm_basic_guardrail_api` for PII masking via the in-process privacy filter
 - **Dynamic loading** – models are started on first request and stopped when idle
 - **VRAM budgeting** – LIFO eviction keeps total GPU memory within a configured limit
-- **Multi-backend** – supports llama.cpp (GGUF), OpenVINO Model Server (IR), `transformers serve`, in-process TTS engines (Qwen3-TTS, Supertonic), the `privacy_filter` PII-masking backend, and NeutronStar (`ns-server`, MoE inference for Intel Arc)
+- **Multi-backend** – supports llama.cpp (GGUF), OpenVINO Model Server (IR), `transformers serve`, in-process TTS engines (Qwen3-TTS, Supertonic), the `privacy_filter` PII-masking backend, NeutronStar (`ns-server`, MoE inference for Intel Arc), and in-process Laya decision models
+- **Built-in small models** – `- name: laya` is enough: DynLLM fills the backend, installs the Python package if needed, and lazy-loads the checkpoint on first use
 - **Per-model idle timeout** – override the global timeout per model, or set `inf`/`-1` to never auto-unload
 - **Startup preloading** – specify models to load when DynLLM starts
 - **Safe mid-generation** – active inference requests are never interrupted by eviction
@@ -37,6 +38,10 @@ after a configurable timeout.
   - **NeutronStar** (optional, `backend: neutronstar`) – build `ns-server` from the NeutronStar
     project (`cargo build --release --bin ns-server`, optionally `scripts/deploy.sh`); it needs
     the OpenVINO runtime and Intel GPU compute-runtime on the host
+  - **Laya** (optional, built-in) – with `torch` already present, DynLLM can install the
+    `laya` package for you (`auto_install: true`); it never installs or replaces `torch`,
+    so custom XPU/CUDA builds are safe. Otherwise run
+    `uv pip install 'laya>=0.4,<0.5'`
 
 ---
 
@@ -74,11 +79,12 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `server.port` | `8000` | Listen port |
 | `total_vram_mb` | `8192` | VRAM budget in MB; eviction fires when exceeded |
 | `idle_timeout_seconds` | `300` | Global idle auto-unload timeout (seconds) |
-| `enabled_backends` | `[llamacpp, openvino]` | Active backends (`llamacpp`, `openvino`, `transformers`, `tts`, `privacy_filter`, `neutronstar`) |
+| `enabled_backends` | `[llamacpp, openvino]` | Active backends (`llamacpp`, `openvino`, `transformers`, `tts`, `privacy_filter`, `neutronstar`, `laya`). A built-in model's backend is enabled automatically |
 | `models_dir` | — | Optional base dir for relative model paths |
 | `db_path` | `dynllm_state.db` | SQLite state database path |
 | `log_level` | `info` | `debug` / `info` / `warning` / `error` |
 | `preload_models` | `[]` | Model names to load on startup |
+| `auto_install` | `true` | Install the `laya` package at startup when it is missing and a usable `torch` is already present. Never installs/replaces `torch` |
 
 ### Backend settings (`backend:`)
 
@@ -96,17 +102,18 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | Field | Required | Description |
 |---|---|---|
 | `name` | yes | Unique model ID; used as the `model` field in API requests |
-| `path` | yes | Path to the `.gguf` file, OpenVINO IR directory, or local Hugging Face model directory |
-| `backend` | yes | `llamacpp`, `openvino`, `transformers`, `tts`, `privacy_filter`, or `neutronstar` |
-| `model_type` | no | `llm`, `decision`, `transcription`, `speech`, `image_generation`, `embedding`, `rerank`, `classification`, `detection`, `segmentation`, `ocr`. Default: `llm`. Note: `decision` (System One / JEV-compatible) is served by `backend: llamacpp`; `speech` is served by `backend: tts` or `transformers` (not OpenVINO); `classification` is reserved for `backend: privacy_filter` |
-| `vram_mb` | yes | Estimated VRAM in MB when loaded (used for eviction math) |
+| `builtin` | no | Built-in preset name (currently `laya`). Naming a model `laya` implies it when `backend`/`path` are absent |
+| `path` | yes* | Path to the `.gguf` file, OpenVINO IR directory, or local Hugging Face model directory. *Not needed for a built-in, which supplies its own default |
+| `backend` | yes* | `llamacpp`, `openvino`, `transformers`, `tts`, `privacy_filter`, `neutronstar`, or `laya`. *Supplied by a built-in |
+| `model_type` | no | `llm`, `decision`, `transcription`, `speech`, `image_generation`, `embedding`, `rerank`, `classification`, `detection`, `segmentation`, `ocr`. Default: `llm`. Note: `decision` (System One / JEV-compatible) is served by `backend: llamacpp` or the in-process `backend: laya`; `speech` is served by `backend: tts` or `transformers` (not OpenVINO); `classification` is reserved for `backend: privacy_filter` |
+| `vram_mb` | yes* | Estimated VRAM in MB when loaded (used for eviction math). *A built-in supplies `0` for CPU; set it explicitly when running Laya on a GPU |
 | `target_device` | no | OpenVINO target device (`CPU`, `GPU`, `NPU`). Default: `CPU` |
 | `n_gpu_layers` | no | llama.cpp only – GPU layers (`-1` = all). Default: `-1` |
 | `context_size` | no | llama.cpp only – context window size. Default: `4096` |
 | `mmproj` | no | llama.cpp only – path to a multimodal projector GGUF (`--mmproj`); needed for vision/audio decision models such as Clef |
 | `extra_args` | no | llama.cpp / NeutronStar only – extra raw backend-server arguments as a list (e.g. `["--batch-size", "2048"]`) |
 | `ovms_shape` | no | OpenVINO only – shape hint (e.g. `"auto"`) |
-| `device` | no | transformers only – execution device (`auto`, `cpu`, `cuda`, `xpu`) |
+| `device` | no | transformers / laya – execution device (`auto`, `cpu`, `cuda`, `xpu`, `mps`). Laya defaults to `cpu` |
 | `dtype` | no | transformers only – load dtype (`auto`, `float16`, `bfloat16`, `float32`) |
 | `quantization` | no | transformers only – `none`, `bnb-4bit`, or `bnb-8bit` for bitsandbytes quantization |
 | `trust_remote_code` | no | transformers only – allow custom repo code when required |
@@ -116,6 +123,11 @@ Copy `config.example.yaml` to `config.yaml` and adjust as needed.
 | `model_timeout` | no | transformers only – backend-side idle timeout in seconds |
 | `revision` | no | transformers only – HF revision rendered as `model@revision` |
 | `tts_engine` | yes (tts only) | TTS engine name (`qwen`, `supertonic`). Required when `backend: tts` |
+| `laya_model` | no | laya only – pin a checkpoint (`english`, `multilingual`, `typed-decisions`); omit for automatic routing |
+| `laya_preload` | no | laya only – build the checkpoints during load instead of on first request. Default: `false` |
+| `laya_preload_models` | no | laya only – checkpoints to preload. Default: `["english", "multilingual"]` |
+| `laya_max_loaded` | no | laya only – checkpoints kept resident at once. Default: `2`; use `1` to reduce RAM. On GPU, `vram_mb` should cover all resident checkpoints |
+| `laya_default_model` | no | laya only – fallback checkpoint when language detection abstains. Default: `multilingual` |
 | `tool_parser` | no | openvino LLM only – parser for tool-call extraction (`llama3`, `hermes3`, `phi4`, `mistral`, `gptoss`, `qwen3coder`, `devstral`, `lfm2`) |
 | `reasoning_parser` | no | openvino LLM only – parser for reasoning-content extraction (`qwen3`, `gptoss`) |
 | `enable_tool_guided_generation` | no | openvino LLM only – guide generation to follow the tool-call schema |
@@ -148,6 +160,9 @@ enabled_backends:
   - transformers
   - tts
   - privacy_filter
+  # laya is enabled automatically by the built-in model below
+
+auto_install: true   # install missing Python packages for built-ins
 
 backend:
   llamacpp_binary: "llama-server"
@@ -201,6 +216,14 @@ models:
     model_type: classification
     vram_mb: 1024
     unload_time: -1                      # keep loaded
+
+  # Built-in Laya decision model: no backend/path/binary required.
+  # The checkpoint is downloaded and built on the first /v1/systemone request.
+  - name: "laya"
+    device: cpu
+    # laya_model: english        # optional checkpoint pin; omit for routing
+    # laya_max_loaded: 1         # reduce RAM on small hosts
+    # vram_mb: 2048              # required if device is cuda/xpu/auto
 
   # OpenVINO LLM with speculative decoding and KV cache optimization
   - name: "codellama-7b-sd"
@@ -328,7 +351,7 @@ curl http://localhost:8000/v1/rerank \
 
 ### `POST /v1/systemone`
 
-System One decision-model endpoint (JEV-compatible), served by llama.cpp for models with `model_type: decision`. The request sends a `state` and typed `questions`; the backend returns a probability per option in a single scoring pass (no generated tokens).
+System One decision-model endpoint (JEV-compatible), served by llama.cpp (`backend: llamacpp`) or in-process by Laya (`backend: laya`) for models with `model_type: decision`. The request sends a `state` and typed `questions`; the backend returns a probability per option in a single scoring pass (no generated tokens).
 
 ```bash
 curl http://localhost:8000/v1/systemone \
@@ -348,6 +371,38 @@ curl http://localhost:8000/v1/systemone \
 ```
 
 Requires a llama.cpp build with decision-model support (PR #29818, merged 2026-10-02) and a decision-model GGUF. Use official `ggml-org` GGUFs (e.g. `ggml-org/Clef-GGUF`); some community conversions lack the custom `clef` architecture. Add `mmproj` for multimodal models that read images, and raise `--batch-size` via `extra_args` for many candidates.
+
+#### Laya (built-in, CPU-friendly)
+
+Laya is a 421M-parameter English checkpoint (322M multilingual) that answers the same typed `choice` / `score` / `noul` questions without generating text. It is **in-process** and needs no GGUF, binary or port. It is *not* a chat model: expose it only through `/v1/systemone` (`model_type: decision`); chat/completion endpoints will reject it.
+
+```yaml
+models:
+  - name: "laya"
+```
+
+That single entry is enough. DynLLM applies `backend: laya`, `model_type: decision`, `vram_mb: 0`, `device: cpu` and `unload_time: -1`, enables the backend, and installs the `laya` Python package at startup if `auto_install` is enabled **and a usable `torch` is already present**. It deliberately never installs or upgrades `torch`, to avoid replacing a custom XPU/CUDA build. If `torch` is missing, install it for your hardware first, then restart DynLLM. The checkpoint is downloaded/built lazily on the first `/v1/systemone` request (unless `laya_preload: true`), so that first call can take several minutes on a cold cache; clients should use a generous timeout or enable preloading.
+
+```bash
+curl http://localhost:8000/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "laya",
+    "state": "I was charged twice for March. Please refund the duplicate today.",
+    "questions": {
+      "department": {
+        "type": "choice",
+        "instructions": "Which team should handle this?",
+        "criteria": {"billing": "refunds", "technical": "bugs", "other": "everything else"}
+      },
+      "churn_risk": {"type": "noul", "instructions": "Does the user threaten to cancel?"}
+    }
+  }'
+```
+
+The official checkpoints are **fp16** (421M / 322M params). On CPU Laya runs in **fp32**, using roughly 1.7 GB RAM for English and 1.3 GB for multilingual; on CUDA/MPS it autocasts fp16/bf16. There are no official int8/int4 checkpoints, and community ONNX/GGUF/MLX conversions are not covered by DynLLM. On memory-constrained hosts set `laya_max_loaded: 1` to keep a single checkpoint resident. Per-request `task`, `lang`, `lang_guess`, `max_len`, `head_max_len` and `min_confidence` are forwarded to Laya; `laya_model` can pin a checkpoint (`english`, `multilingual`, `typed-decisions`) instead of using the language router.
+
+If `torch` is not installed yet, install the wheel for your hardware first (the same XPU/CUDA commands used for `transformers` above), then let `auto_install` add `laya` or run `uv pip install 'laya>=0.4,<0.5'` yourself. DynLLM will not silently pull the default CUDA torch into an XPU environment.
 
 ### `POST /beta/litellm_basic_guardrail_api`
 
@@ -412,8 +467,11 @@ When a request arrives for any configured endpoint (`/v1/chat/completions`, `/v1
 3. If not enough VRAM: evicts models in **LIFO order** (most recently loaded first),
    skipping any model currently serving a request.
 4. Starts the backend (a subprocess for llama.cpp/OVMS/transformers, or an
-   in-process engine for `tts` / `privacy_filter`) and waits for it to be ready.
-5. Proxies the request to the backend and streams the response back.
+   in-process engine for `tts` / `privacy_filter` / `laya`) and waits for it to
+   be ready.
+5. Proxies the request to the backend and streams the response back. Laya is
+   called directly in-process; its checkpoint is built on the first request
+   unless `laya_preload: true`.
 
 ### Idle auto-unload
 
@@ -443,7 +501,9 @@ evicts the **most recently loaded** model first (Last-In, First-Out). This heuri
 favours keeping the models you have been using longest resident in memory.
 
 Models with in-flight requests are **never** evicted; the load will fail with HTTP 503
-if eviction is impossible due to all candidates being busy.
+if eviction is impossible due to all candidates being busy. Models that declare
+`vram_mb: 0` (CPU Laya, CPU TTS, …) are also never chosen as victims: evicting them
+cannot free GPU memory.
 
 ### State persistence
 
@@ -522,6 +582,16 @@ lines in `systemd/dynllm.service`.
 - Mask strategies: `replace` (category tag such as `[EMAIL]`), `redact` (`[REDACTED]`), `hash` (`[REDACTED_<hash>]`).
 - Consumed by litellm through `POST /beta/litellm_basic_guardrail_api`.
 - Requires the `transformers` and `torch` packages in the DynLLM environment.
+
+### Laya (in-process, built-in)
+
+- Serves `model_type: decision` with `backend: laya` at `/v1/systemone`.
+- A complete model entry can be just `- name: laya`: the built-in supplies `backend`, `path`, `model_type: decision`, `vram_mb: 0`, `device: cpu` and `unload_time: -1`, and enables the backend automatically.
+- Runs Laya's `Router` directly in the DynLLM process through the `laya` Python package; no `laya-serve`, binary or port.
+- Lazy by default: `Router` construction is cheap and the routed checkpoint is downloaded/built on the first request. Set `laya_preload: true` to build `laya_preload_models` during load.
+- `laya_model` pins a checkpoint (`english`, `multilingual`, `typed-decisions`); omit it for automatic language routing. `laya_max_loaded` controls how many checkpoints stay resident (default `2`, use `1` on small hosts).
+- Official checkpoints are fp16; CPU inference runs fp32. No official quantized checkpoints are supported.
+- If `auto_install` is `true`, `torch>=2.0` is already installed, and the `laya` package is missing, DynLLM installs it at startup with `uv pip install 'laya>=0.4,<0.5'` (uv leaves the existing torch untouched and adds the small Python dependencies). It never installs or replaces `torch` itself. Set `auto_install: false` for read-only/air-gapped environments.
 
 ### Hugging Face transformers
 

@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dynllm.api import routes
+from dynllm.backends.laya import LayaBackend
 from dynllm.main import create_app
 
 
@@ -13,6 +14,7 @@ class DummyVRAM:
     def __init__(self) -> None:
         self.loaded_models: list[str] = []
         self._ports: dict[str, int] = {}
+        self.instances: dict[str, object] = {}
 
     async def ensure_loaded(self, model):
         self.loaded_models.append(model.name)
@@ -21,11 +23,26 @@ class DummyVRAM:
     async def get_port(self, model_name: str):
         return self._ports.get(model_name)
 
+    def get_instance(self, model_name: str):
+        return self.instances.get(model_name)
+
     async def increment_active(self, model_name: str) -> None:
         pass
 
     async def decrement_active(self, model_name: str) -> None:
         pass
+
+
+class DummyLayaBackend(LayaBackend):
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, object, dict]] = []
+
+    async def predict(self, state, questions, **kwargs):
+        self.calls.append((state, questions, kwargs))
+        return {
+            "answers": {"billing": {"choice": "billing", "confidence": 0.9}},
+            "routing": {"model": "english"},
+        }
 
 
 class DummyState:
@@ -41,6 +58,7 @@ def app(tmp_path: Path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         """
+auto_install: false
 enabled_backends:
   - llamacpp
 models:
@@ -54,6 +72,8 @@ models:
     backend: llamacpp
     model_type: llm
     vram_mb: 5500
+  - name: laya
+    device: cpu
 """.strip()
     )
     return create_app(str(config_path))
@@ -73,6 +93,7 @@ def client(app, monkeypatch: pytest.MonkeyPatch):
         return routes.Response(content=b"{}", media_type="application/json")
 
     monkeypatch.setattr(routes, "forward_request", fake_forward_request)
+    dummy_vram.instances["laya"] = DummyLayaBackend()
     app.state._dummy_vram = dummy_vram
     app.state._dummy_state = dummy_state
     app.state._forwarded = forwarded
@@ -123,3 +144,38 @@ def test_systemone_unknown_model(client):
     )
 
     assert response.status_code == 404
+
+
+def test_systemone_dispatches_to_in_process_laya(client):
+    backend = client.app.state._dummy_vram.instances["laya"]
+
+    response = client.post(
+        "/v1/systemone",
+        json={
+            "model": "laya",
+            "state": "I was charged twice.",
+            "questions": {
+                "billing": {
+                    "type": "choice",
+                    "criteria": {"billing": "refunds", "other": "everything else"},
+                }
+            },
+            "lang": "en",
+            "max_len": 512,
+            "unknown_control": "ignored",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["answers"]["billing"]["choice"] == "billing"
+    assert client.app.state._dummy_vram.loaded_models == ["laya"]
+    assert client.app.state._dummy_state.touched == ["laya"]
+    # The request must not be sent to a subprocess proxy.
+    assert client.app.state._forwarded == []
+
+    state, questions, kwargs = backend.calls[0]
+    assert state == "I was charged twice."
+    assert "billing" in questions
+    assert kwargs["lang"] == "en"
+    assert kwargs["max_len"] == 512
+    assert kwargs.get("model") is None

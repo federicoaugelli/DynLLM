@@ -11,10 +11,12 @@ import math
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
+
+from dynllm.core.builtins import BUILTIN_DEFAULTS
 
 
 class BackendType(str, Enum):
@@ -24,6 +26,7 @@ class BackendType(str, Enum):
     tts = "tts"
     privacy_filter = "privacy_filter"
     neutronstar = "neutronstar"
+    laya = "laya"
 
 
 class ModelType(str, Enum):
@@ -81,7 +84,20 @@ _SUPPORTED_MODEL_TYPES: dict[BackendType, tuple[ModelType, ...]] = {
     BackendType.tts: (ModelType.speech,),
     BackendType.privacy_filter: (ModelType.classification,),
     BackendType.neutronstar: (ModelType.llm,),
+    BackendType.laya: (ModelType.decision,),
 }
+
+# Fields that only make sense for the in-process Laya backend.  The mapping
+# stores the value used by ``ModelConfig`` when the field is untouched.
+_LAYA_ONLY_FIELDS: dict[str, object] = {
+    "laya_model": None,
+    "laya_preload": False,
+    "laya_preload_models": ["english", "multilingual"],
+    "laya_max_loaded": 2,
+    "laya_default_model": None,
+}
+
+_LAYA_DEVICES = frozenset({"auto", "cpu", "cuda", "xpu", "mps"})
 
 # Fields that only make sense for an OpenVINO LLM (speculative decoding,
 # KV-cache and scheduling knobs).
@@ -109,6 +125,16 @@ class ModelConfig(BaseModel):
 
     name: str
     """Unique model identifier used in API requests (e.g. 'llama3-8b')."""
+
+    builtin: Optional[str] = None
+    """
+    Name of a built-in preset (e.g. ``"laya"``).
+
+    When set, missing fields are filled from
+    :data:`dynllm.core.builtins.BUILTIN_DEFAULTS`.  Naming a model after a
+    preset (``- name: laya``) implies ``builtin: laya`` unless a different
+    backend or an explicit path is declared.
+    """
 
     path: Path
     """Absolute or relative path to the model directory/file."""
@@ -185,6 +211,30 @@ class ModelConfig(BaseModel):
     tts_engine: str = ""
     """TTS engine name ('qwen', 'supertonic'). Required when backend=tts."""
 
+    # --- Laya decision model (in-process) ---
+    laya_model: Optional[str] = None
+    """
+    Pin a Laya checkpoint (``english``, ``multilingual``, ``typed-decisions``)
+    or leave ``None`` to let the Router choose per request.
+    """
+
+    laya_preload: bool = False
+    """
+    Build the configured checkpoints during load instead of on the first
+    request.  Lazy loading (the default) keeps startup fast.
+    """
+
+    laya_preload_models: list[str] = Field(
+        default_factory=lambda: ["english", "multilingual"]
+    )
+    """Checkpoints preloaded when ``laya_preload`` is true."""
+
+    laya_max_loaded: int = Field(default=2, ge=1)
+    """Checkpoints kept resident at once (Laya's default is 2)."""
+
+    laya_default_model: Optional[str] = None
+    """Fallback checkpoint for text without usable language evidence."""
+
     # --- NeutronStar specific ---
     ns_max_seq: Optional[int] = Field(default=None, gt=0)
     """KV capacity passed to ns-server as ``--max-seq`` (server default: 16384)."""
@@ -246,6 +296,48 @@ class ModelConfig(BaseModel):
     # Validators
     # ------------------------------------------------------------------
 
+    @model_validator(mode="before")
+    @classmethod
+    def apply_builtin_defaults(cls, data: Any) -> Any:
+        """Fill a built-in preset before normal field validation.
+
+        Inference by name is intentionally conservative: it only applies when
+        the declaration names a preset, does not point at an explicit ``path``
+        and does not select a different backend.  That keeps a user model that
+        happens to be called ``laya`` but points at a GGUF untouched.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        explicit = data.get("builtin")
+        name = data.get("name")
+        preset_name = explicit or name
+        if not preset_name:
+            return data
+
+        defaults = BUILTIN_DEFAULTS.get(preset_name)
+        if defaults is None:
+            if explicit:
+                known = ", ".join(sorted(BUILTIN_DEFAULTS))
+                raise ValueError(
+                    f"unknown builtin '{explicit}'; available built-ins: {known}"
+                )
+            return data
+
+        if explicit is None and "path" not in data:
+            # A custom backend or a model that only repeats the preset backend
+            # still benefits from the preset defaults.  An explicit ``path``
+            # means the user is pointing at their own checkpoint.
+            if data.get("backend") not in (None, defaults["backend"]):
+                return data
+        elif explicit is None:
+            return data
+
+        merged = dict(defaults)
+        merged.update({key: value for key, value in data.items() if value is not None})
+        merged["builtin"] = preset_name
+        return merged
+
     @field_validator("unload_time", mode="before")
     @classmethod
     def parse_unload_time(cls, v: object) -> Optional[float]:
@@ -298,6 +390,20 @@ class ModelConfig(BaseModel):
         if not value:
             raise ValueError("value cannot be empty")
         return value
+
+    @field_validator("laya_model", "laya_default_model")
+    @classmethod
+    def normalize_optional_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        value = v.strip()
+        return value or None
+
+    @field_validator("laya_preload_models")
+    @classmethod
+    def normalize_preload_models(cls, v: list[str]) -> list[str]:
+        names = [name.strip() for name in v if name.strip()]
+        return names or ["english", "multilingual"]
 
     @field_validator("revision")
     @classmethod
@@ -403,6 +509,28 @@ class ModelConfig(BaseModel):
                     "float16, or bfloat16"
                 )
 
+        if self.builtin:
+            preset = BUILTIN_DEFAULTS.get(self.builtin)
+            if preset is not None and self.backend.value != preset["backend"]:
+                raise ValueError(
+                    f"builtin '{self.builtin}' requires backend={preset['backend']}"
+                )
+
+        if self.backend == BackendType.laya:
+            if self.device not in _LAYA_DEVICES:
+                raise ValueError(
+                    "laya device must be one of: " + ", ".join(sorted(_LAYA_DEVICES))
+                )
+            if self.device != "cpu" and self.vram_mb == 0:
+                raise ValueError(
+                    "laya on device='%s' requires vram_mb > 0 (or use device: cpu)"
+                    % self.device
+                )
+        else:
+            for field_name, default in _LAYA_ONLY_FIELDS.items():
+                if getattr(self, field_name) != default:
+                    raise ValueError(f"{field_name} is only supported for backend=laya")
+
         return self
 
 
@@ -441,7 +569,7 @@ class Settings(BaseModel):
     """Seconds of inactivity before a model is automatically unloaded."""
 
     enabled_backends: list[BackendType] = Field(
-        default=[BackendType.llamacpp, BackendType.openvino]
+        default_factory=lambda: [BackendType.llamacpp, BackendType.openvino]
     )
     """Active backends. Models whose backend is not listed are rejected."""
 
@@ -449,6 +577,13 @@ class Settings(BaseModel):
 
     preload_models: list[str] = Field(default_factory=list)
     """Names of models to load automatically on startup."""
+
+    auto_install: bool = True
+    """
+    Install missing Python packages required by in-process built-in models
+    (currently ``laya``) at startup.  Set to ``false`` for read-only or
+    air-gapped deployments.
+    """
 
     db_path: Path = Field(default=Path("dynllm_state.db"))
     """Path to the SQLite state database."""
@@ -464,6 +599,13 @@ class Settings(BaseModel):
                     model.path = base / model.path
                 if model.mmproj is not None and not model.mmproj.is_absolute():
                     model.mmproj = base / model.mmproj
+
+        # Built-in models bring their backend with them: requiring the user to
+        # repeat ``laya`` in enabled_backends defeats the point of a preset.
+        for model in self.models:
+            if model.builtin and model.backend not in self.enabled_backends:
+                self.enabled_backends.append(model.backend)
+
         return self
 
     @field_validator("db_path", mode="before")

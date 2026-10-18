@@ -31,6 +31,7 @@ import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, Response
 
 from dynllm.api.proxy import forward_request, forward_streaming_request
@@ -49,6 +50,7 @@ from dynllm.api.schemas import (
     SystemOneRequest,
     UnloadRequest,
 )
+from dynllm.backends.laya import LayaBackend
 from dynllm.backends.privacy_filter import PrivacyFilterBackend
 from dynllm.backends.tts import TTSBackend
 from dynllm.core.config import BackendType, ModelConfig, ModelType, Settings
@@ -511,6 +513,38 @@ async def systemone(
     model_cfg = _require_model(
         settings, body.model, expected_types={ModelType.decision}
     )
+
+    if model_cfg.backend == BackendType.laya:
+        await _ensure_loaded(model_cfg, vram)
+        await state.touch(model_cfg.name)
+        backend = vram.get_instance(model_cfg.name)
+        if not isinstance(backend, LayaBackend):
+            raise HTTPException(status_code=503, detail="Laya backend not available")
+
+        controls = body.model_dump(exclude={"model", "state", "questions"})
+        await vram.increment_active(model_cfg.name)
+        try:
+            result = await backend.predict(
+                body.state,
+                body.questions,
+                model=model_cfg.laya_model,
+                **controls,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RuntimeError as exc:
+            logger.warning("Laya inference failed for '%s': %s", model_cfg.name, exc)
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Unexpected Laya failure for '%s'", model_cfg.name)
+            raise HTTPException(
+                status_code=500, detail=f"Laya inference failed: {exc}"
+            ) from exc
+        finally:
+            await vram.decrement_active(model_cfg.name)
+
+        return JSONResponse(content=jsonable_encoder(result))
+
     return await _proxy_model_request(
         request,
         model_cfg=model_cfg,

@@ -13,10 +13,15 @@ instructions for the user to follow.
 
 from __future__ import annotations
 
+import importlib.metadata
+import importlib.util
 import logging
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
+from dynllm.core.builtins import BUILTIN_PACKAGE_SPECS, BUILTIN_REQUIREMENTS
 from dynllm.core.config import BackendType, Settings
 
 logger = logging.getLogger(__name__)
@@ -62,6 +67,15 @@ _INSTALL_HINTS: dict[BackendType, str] = {
         "  Requires the OpenVINO runtime and Intel GPU compute-runtime.\n"
         "  Or set 'backend.neutronstar_binary' in your config to the full path."
     ),
+    BackendType.laya: (
+        "The in-process Laya backend requires torch>=2.0 and the 'laya'\n"
+        "Python package. DynLLM never installs or replaces torch itself:\n"
+        "  1. Install the torch build for your hardware (CPU/XPU/CUDA).\n"
+        "  2. Install Laya with:\n"
+        "       uv pip install 'laya>=0.4,<0.5'\n"
+        "  With auto_install: true DynLLM will add Laya automatically once\n"
+        "  torch is present."
+    ),
 }
 
 
@@ -98,6 +112,142 @@ def detect_execution_backends() -> list[str]:
     return backends
 
 
+def _package_available(name: str) -> bool:
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _torch_compatible() -> tuple[bool, str | None]:
+    """Return whether an installed torch can be reused by Laya.
+
+    DynLLM deliberately never installs torch as part of ``auto_install``:
+    doing so would pull the default CUDA wheel and could replace a custom
+    XPU/CUDA build that other backends depend on.  If torch is already there,
+    ``uv pip install laya`` leaves it satisfied and only adds the small
+    pure-Python dependencies.
+    """
+    if not _package_available("torch"):
+        return False, "torch is not installed"
+    try:
+        version = importlib.metadata.version("torch")
+    except importlib.metadata.PackageNotFoundError:
+        return True, None
+    try:
+        major = int(version.split(".", 1)[0])
+    except ValueError:
+        return True, None
+    if major < 2:
+        return False, f"torch {version} is too old (Laya needs torch>=2.0)"
+    return True, None
+
+
+def install_python_package(package_spec: str) -> None:
+    """Install *package_spec* into the interpreter running DynLLM.
+
+    Uses ``uv pip --python <sys.executable>`` when uv is available (the project
+    is uv-first) and falls back to ``python -m pip`` otherwise.  The caller
+    decides whether automatic installation is allowed.
+    """
+    uv = shutil.which("uv")
+    if uv is not None:
+        cmd = [uv, "pip", "install", "--python", sys.executable, package_spec]
+    else:
+        cmd = [sys.executable, "-m", "pip", "install", package_spec]
+
+    logger.info("Installing missing Python package: %s", package_spec)
+    logger.info("Running: %s", " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        output = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(
+            f"Failed to install '{package_spec}' (exit {result.returncode}):\n"
+            f"{output[-4000:]}"
+        )
+
+    importlib.invalidate_caches()
+    logger.info("Python package installed: %s", package_spec)
+
+
+def _ensure_builtin_packages(settings: Settings, backend_type: BackendType) -> None:
+    """Check (and optionally install) the Python packages for a built-in backend."""
+    builtin_name = next(
+        (
+            model.builtin
+            for model in settings.models
+            if model.backend == backend_type and model.builtin
+        ),
+        backend_type.value,
+    )
+    requires = BUILTIN_REQUIREMENTS.get(builtin_name or "", ())
+    if not requires:
+        return
+
+    missing = [package for package in requires if not _package_available(package)]
+    if not missing:
+        logger.info(
+            "Backend '%s' packages found: %s",
+            backend_type.value,
+            ", ".join(requires),
+        )
+        return
+
+    hint = _INSTALL_HINTS.get(backend_type, "")
+    if not settings.auto_install:
+        logger.warning(
+            "Backend '%s' missing packages: %s\n%s",
+            backend_type.value,
+            ", ".join(missing),
+            hint,
+        )
+        return
+
+    # Installing the 'laya' wheel normally would also resolve torch.  On a
+    # machine without torch, uv would pull the default CUDA build (several
+    # GB) and could clobber a custom XPU build.  Only install when torch is
+    # already present and usable; otherwise leave the decision to the user.
+    torch_ok, torch_reason = _torch_compatible()
+    if not torch_ok:
+        logger.warning(
+            "Backend '%s' cannot be installed automatically: %s.\n"
+            "Install torch for this machine (for example a CPU or XPU wheel), "
+            "then restart DynLLM or run:\n"
+            "  %s",
+            backend_type.value,
+            torch_reason,
+            hint,
+        )
+        return
+
+    package_spec = BUILTIN_PACKAGE_SPECS.get(builtin_name, builtin_name)
+    try:
+        install_python_package(package_spec)
+    except Exception as exc:
+        logger.warning(
+            "Automatic install of '%s' failed: %s\n%s",
+            package_spec,
+            exc,
+            hint,
+        )
+        return
+
+    still_missing = [package for package in requires if not _package_available(package)]
+    if still_missing:
+        logger.warning(
+            "Backend '%s' still missing packages after install: %s\n%s",
+            backend_type.value,
+            ", ".join(still_missing),
+            hint,
+        )
+    else:
+        logger.info(
+            "Backend '%s' packages ready: %s",
+            backend_type.value,
+            ", ".join(requires),
+        )
+
+
 def check_backends(settings: Settings) -> None:
     """
     Warn if any enabled backend binary is not found.
@@ -113,6 +263,10 @@ def check_backends(settings: Settings) -> None:
     }
 
     for backend_type in settings.enabled_backends:
+        if backend_type == BackendType.laya:
+            _ensure_builtin_packages(settings, backend_type)
+            continue
+
         if backend_type == BackendType.privacy_filter:
             try:
                 import transformers  # noqa: F401

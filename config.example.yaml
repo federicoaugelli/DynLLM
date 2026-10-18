@@ -35,6 +35,7 @@ enabled_backends:
   # - tts             # in-process TTS engines (Qwen, Supertonic, …)
   # - privacy_filter  # in-process PII masking via openai/privacy-filter (HF)
   # - neutronstar     # serves merged MoE GGUFs via NeutronStar ns-server (Intel Arc)
+  # - laya            # in-process Laya decision models (auto-enabled by the built-in below)
 
 # Backend binary configuration
 backend:
@@ -63,6 +64,16 @@ db_path: dynllm_state.db
 log_level: "info"   # debug | info | warning | error
 
 # ------------------------------------
+# Automatic dependency installation
+# ------------------------------------
+# Built-in in-process models (currently Laya) can install their Python
+# package on first startup if it is missing and torch is already present.
+# DynLLM never installs or replaces torch itself, so custom XPU/CUDA builds
+# are safe. Set to false for read-only, air-gapped or strictly managed
+# deployments.
+auto_install: true
+
+# ------------------------------------
 # Startup preload
 # ------------------------------------
 # Models listed here are loaded automatically when DynLLM starts.
@@ -77,7 +88,8 @@ log_level: "info"   # debug | info | warning | error
 # Each model has:
 #   name         – unique ID used in API requests (model field)
 #   path         – file (.gguf) or directory (OpenVINO IR) on disk
-#   backend      – "llamacpp", "openvino", "transformers", or "tts"
+#   backend      – "llamacpp", "openvino", "transformers", "tts",
+#                  "privacy_filter", "neutronstar", or "laya"
 #   model_type   – "llm", "decision", "transcription", "speech",
 #                  "embedding", "rerank", "classification",
 #                  "detection", "segmentation", "ocr",
@@ -264,6 +276,29 @@ models:
     tts_engine: supertonic
     target_device: xpu
     vram_mb: 2000
+
+  # --- Built-in Laya decision model (in-process, CPU-friendly) ---
+  # Laya answers typed questions (choice / score / noul) over a state via
+  # POST /v1/systemone. It is not a chat model. It is a built-in: no backend,
+  # path or binary needs to be declared. DynLLM enables the backend
+  # automatically, installs the 'laya' package if needed and torch is already
+  # present (auto_install), and downloads the checkpoint on first use unless
+  # preloading is enabled.
+  #
+  # Official checkpoints are fp16 (421M / 322M params). On CPU Laya runs in
+  # fp32 (~1.7 GB RAM for English, ~1.3 GB for multilingual); on CUDA/MPS it
+  # autocasts fp16/bf16. Use laya_max_loaded: 1 to keep a single checkpoint
+  # resident on memory-constrained hosts.
+  - name: "laya"
+    # builtin: laya            # inferred from the name; set it to use another name
+    device: cpu                # auto | cpu | cuda | xpu | mps
+    # vram_mb: 2048            # required >0 when device is cuda/xpu/auto
+    # laya_model: english      # pin a checkpoint; omit for automatic routing
+    # laya_preload: true       # default false: first request loads the checkpoint
+    # laya_preload_models: ["english", "multilingual"]
+    # laya_max_loaded: 2
+    # laya_default_model: multilingual
+    # unload_time: -1          # built-in default: keep resident
 
   # --- Privacy filter (in-process, Hugging Face token-classification) ---
   # Used by litellm's Generic Guardrail API for PII masking in prompts.

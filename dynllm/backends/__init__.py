@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from dynllm.backends.base import Backend, InProcessBackend, SubprocessBackend
+from dynllm.backends.laya import LayaBackend
 from dynllm.backends.llamacpp import LlamaCppBackend
 from dynllm.backends.neutronstar import NeutronStarBackend
 from dynllm.backends.openvino import OpenVINOBackend
@@ -22,6 +23,7 @@ _FACTORIES: dict[BackendType, Callable[[Settings], Backend]] = {
     BackendType.neutronstar: lambda s: NeutronStarBackend(s.backend.neutronstar_binary),
     BackendType.tts: lambda _s: TTSBackend(),
     BackendType.privacy_filter: lambda _s: PrivacyFilterBackend(),
+    BackendType.laya: lambda _s: LayaBackend(),
 }
 
 
@@ -50,6 +52,7 @@ __all__ = [
     "Backend",
     "BackendRegistry",
     "InProcessBackend",
+    "LayaBackend",
     "LlamaCppBackend",
     "NeutronStarBackend",
     "OpenVINOBackend",

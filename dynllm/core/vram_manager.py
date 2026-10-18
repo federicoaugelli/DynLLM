@@ -165,13 +165,30 @@ class VRAMManager:
         while await self._free_vram() < required_mb:
             free = await self._free_vram()
             loaded = await self._state.get_loaded()
-            evictable = [m for m in loaded if self.active_count(m.name) == 0]
+            # A model that claims no VRAM (CPU-only Laya, a CPU TTS engine, …)
+            # cannot help free GPU memory.  Evicting it would only force a cold
+            # reload later, so it is never a candidate.
+            evictable = [
+                m for m in loaded if m.vram_mb > 0 and self.active_count(m.name) == 0
+            ]
             if not evictable:
                 busy = [m.name for m in loaded if self.active_count(m.name) > 0]
+                zero_vram = [
+                    m.name
+                    for m in loaded
+                    if m.vram_mb == 0 and self.active_count(m.name) == 0
+                ]
+                detail = ""
+                if busy:
+                    detail += f" Busy models: {busy}."
+                if zero_vram:
+                    detail += (
+                        f" Models using no VRAM cannot be evicted for GPU "
+                        f"space: {zero_vram}."
+                    )
                 raise RuntimeError(
                     f"Not enough VRAM: need {required_mb} MB but only {free} MB "
-                    f"free. All loaded models have active requests and cannot "
-                    f"be evicted: {busy}"
+                    f"free. No loaded model can free GPU memory.{detail}"
                 )
 
             victim = max(evictable, key=lambda m: m.load_order)
